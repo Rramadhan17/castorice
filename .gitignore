@@ -1,0 +1,77 @@
+# Environment credentials and local overrides
+.env
+.env.*
+*.env
+!.env.example
+
+# Installed dependencies and generated output
+node_modules/
+coverage/
+dist/
+
+# Runtime data and logs
+/data/**
+!/data/.gitkeep
+/logs/**
+!/logs/.gitkeep
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+
+# Local cache and temporary files
+.cache/
+cache/
+tmp/
+temp/
+*.tmp
+*.temp
+*.cache
+*.tsbuildinfo
+*.pid
+*.pid.lock
+
+# Local downloader binaries
+/bin/yt-dlp*
+/bin/ffmpeg*
+
+# Local backups
+*.bak
+*.bak-*
+*.bak.*
+*.backup
+*.backup-*
+*.backup.*
+*-backup
+*-backup.*
+*.metadata-backup
+*.player-backup
+*.search-backup
+*.updater-backup
+
+# Private keys, credentials and local database files
+secrets/
+credentials/
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+*.jks
+*.keystore
+*.secret
+*.credentials
+id_rsa*
+id_ed25519*
+service-account*.json
+config.local.*
+*.sqlite
+*.sqlite3
+*.db
+
+# OS and editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
