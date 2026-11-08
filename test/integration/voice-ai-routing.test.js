@@ -19,6 +19,13 @@ test("Voice AI natural trigger routes the prompt to speech service after guild o
         on: (event, handler) => handlers.set(event, handler)
     };
     registerInteractionHandler(client, {
+        globalAISettings: {
+            getSettings: async () => ({
+                enabled: true,
+                providerOrder: null,
+                failoverEnabled: null
+            })
+        },
         voiceAIService: {
             respondAndSpeak: async request => {
                 calls.push(request);
@@ -65,6 +72,13 @@ test("Voice AI route does not create a temporary voice channel from voice phrasi
         on: (event, handler) => handlers.set(event, handler)
     };
     registerInteractionHandler(client, {
+        globalAISettings: {
+            getSettings: async () => ({
+                enabled: true,
+                providerOrder: null,
+                failoverEnabled: null
+            })
+        },
         voiceAIService: {
             respondAndSpeak: async () => ({ text: "answer", spoken: true })
         },

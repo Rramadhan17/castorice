@@ -86,6 +86,74 @@ test("provider reports safe error codes and rejects unsafe endpoint forms", asyn
     }), /without credentials/);
 });
 
+test("OpenAI-compatible adapter classifies invalid keys, quota, rate limits, models, and outages", async () => {
+    const cases = [
+        [401, { error: { code: "invalid_api_key", message: "do not expose this detail" } }, "invalid_api_key"],
+        [429, { error: { code: "insufficient_quota", message: "billing detail" } }, "quota_exceeded"],
+        [429, { error: { code: "rate_limit_exceeded" } }, "rate_limited"],
+        [404, { error: { code: "model_not_found" } }, "model_not_compatible"],
+        [503, { error: { message: "private outage detail" } }, "provider_unavailable"]
+    ];
+
+    for (const [status, body, expectedCode] of cases) {
+        let calls = 0;
+        const provider = new OpenAICompatibleProvider({
+            apiKey: "test-secret",
+            model: "test-model",
+            fetchImpl: async () => {
+                calls += 1;
+                return jsonResponse(body, status);
+            }
+        });
+        await assert.rejects(
+            provider.generate([{ role: "user", content: "Hello" }]),
+            error => error.code === expectedCode &&
+                !error.message.includes("private") &&
+                !error.message.includes("billing")
+        );
+        assert.equal(calls, expectedCode === "rate_limited" || expectedCode === "provider_unavailable" ? 2 : 1);
+    }
+});
+
+test("OpenAI-compatible adapter exposes only safe HTTP status and operation metadata", async () => {
+    const provider = new OpenAICompatibleProvider({
+        apiKey: "test-secret",
+        model: "test-model",
+        maxRetries: 0,
+        fetchImpl: async () => jsonResponse({
+            error: { message: "private validation detail containing a secret" }
+        }, 400)
+    });
+
+    await assert.rejects(
+        provider.generate([{ role: "user", content: "Hello" }]),
+        error => error.code === "provider_error" &&
+            error.operation === "generate" &&
+            error.statusCode === 400 &&
+            !error.message.includes("private")
+    );
+});
+
+test("OpenAI-compatible adapter rejects malformed successful responses safely", async () => {
+    const provider = new OpenAICompatibleProvider({
+        apiKey: "test-secret",
+        model: "test-model",
+        maxRetries: 0,
+        fetchImpl: async () => ({
+            ok: true,
+            status: 200,
+            json: async () => { throw new Error("private malformed body"); }
+        })
+    });
+
+    await assert.rejects(
+        provider.generate([{ role: "user", content: "Hello" }]),
+        error => error.code === "invalid_response" &&
+            error.operation === "generate" &&
+            !error.message.includes("private")
+    );
+});
+
 test("provider aborts requests after its configured timeout", async () => {
     const provider = new OpenAICompatibleProvider({
         apiKey: "test-secret",
@@ -136,7 +204,10 @@ test("provider aborts an active request when its conversation is reset", async (
 
 test("provider factory stays unconfigured until a key is supplied", () => {
     assert.equal(createAIProviderFromEnv({}), null);
-    assert.equal(createAIProviderFromEnv({ AI_API_KEY: "test-secret" }), null);
+    const discovered = createAIProviderFromEnv({ AI_API_KEY: "test-secret" });
+    assert.ok(discovered instanceof OpenAICompatibleProvider);
+    assert.equal(discovered.model, null);
+    assert.equal(discovered.modelDiscovery, "openai");
     assert.throws(() => createAIProviderFromEnv({
         AI_API_KEY: "test-secret",
         AI_MODEL: "test-model",

@@ -7,7 +7,7 @@ const {
     buildTranslatorLanguagePanel
 } = require("../../src/dashboard/menu-panel");
 
-test("dashboard advertises Translator and disables unfinished modules", () => {
+test("dashboard exposes supported navigation and hides non-dashboard feature panels", () => {
     const guild = {
         id: "123456789012345678",
         voiceStates: { cache: { filter: () => ({ size: 0 }) } },
@@ -18,15 +18,31 @@ test("dashboard advertises Translator and disables unfinished modules", () => {
     const payload = buildDashboard(guild);
     const buttons = payload.components.flatMap(row => row.components.map(component => component.toJSON()));
     const translator = buttons.find(button => button.custom_id === "castorice:translator");
-    const templates = buttons.find(button => button.custom_id === "castorice:server_templates");
     const playlists = buttons.find(button => button.custom_id === "castorice:playlists");
+    const navigation = [
+        "castorice:music",
+        "castorice:ai_chat",
+        "castorice:translator",
+        "voice:open",
+        "castorice:playlists",
+        "castorice:settings"
+    ];
+    const forbidden = [
+        "castorice:server_templates",
+        "castorice:feature_selection",
+        "castorice:voice_manager",
+        "owner:open",
+        "castorice:security_assistant"
+    ];
 
     assert.equal(translator.disabled, false);
-    const greeter = buttons.find(button => button.label === "Voice Greeter");
-    assert.equal(greeter.disabled, false);
-    assert.equal(greeter.custom_id, "castorice:feature_selection");
-    assert.equal(templates.disabled, false);
     assert.equal(playlists.disabled, false);
+    for (const customId of navigation) {
+        assert.ok(buttons.some(button => button.custom_id === customId), `missing ${customId}`);
+    }
+    for (const customId of forbidden) {
+        assert.equal(buttons.some(button => button.custom_id === customId), false);
+    }
 });
 
 test("Translator panel opens a bounded modal with source and target fields", () => {

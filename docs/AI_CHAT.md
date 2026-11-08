@@ -1,24 +1,50 @@
 # AI Chat Configuration
 
-AI Chat uses an OpenAI-compatible Chat Completions endpoint. No external AI
-package is required; the provider uses the Node.js `fetch` implementation.
+Google Gemini is Castorice's only AI provider. AI Chat and Voice AI use the
+same Gemini integration; a Gemini failure never triggers a request to OpenAI,
+OpenRouter, or another provider.
 
-1. Copy the AI settings from `.env.example` into the bot's `.env`.
-2. Set `AI_API_KEY` and `AI_MODEL` to credentials and a model supported by the
-   selected provider.
-3. Optionally set `AI_BASE_URL` for another OpenAI-compatible provider and
-   `AI_TIMEOUT_MS` (100–120000 milliseconds).
-4. Start the bot and enable **AI Chat** from `/menu` → **Settings** → **Feature
-   Selection** for each guild that should use it.
-5. Mention Castorice or start a message with `Castorice:`. Use
-   `Castorice: reset percakapan` to clear that user's conversation context.
+Configure these process environment variables:
 
-Conversation context is held in process memory, isolated by guild and user,
-limited in size, and expires after 30 minutes of inactivity. It is not written
-to disk and is cleared when the process restarts. A provider call is made only
-after a valid bot trigger and an enabled guild feature. Do not send sensitive
-information: prompts are sent to the configured external provider.
+- `GEMINI_API_KEY` — required Gemini API key.
+- `GEMINI_MODEL` — optional Gemini model ID. If omitted, Castorice performs
+  bounded, timed discovery of models supporting `generateContent`.
+- `AI_TIMEOUT_MS` — optional request timeout from 100 to 120000 milliseconds;
+  defaults to 15000.
 
-Without both `AI_API_KEY` and `AI_MODEL`, AI Chat remains unavailable and the
-bot reports that configuration is required. No provider or model is assumed
-to be available, and no test credential or API call is included.
+Legacy `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL`, `OPENROUTER_API_KEY`,
+`OPENROUTER_MODEL`, `AI_PROVIDER_ORDER`, and `AI_FAILOVER_ENABLED` values are
+not used by the runtime. Provider priority, rotation, and cross-provider
+failover have been removed. The existing Gemini environment configuration is
+preserved. Never place real keys in tracked example files.
+
+Gemini generates natural-language answers to general questions, explanations,
+discussion, and idea requests. The system prompt guides Indonesian, informal
+Indonesian, slang, English, and mixed-language responses to follow the user's
+language. Feature intents still route through deterministic intent handlers
+and permission-checked backend services; conversational AI does not execute
+server-changing actions by itself.
+
+Conversation context is held temporarily in memory, scoped to the guild and
+channel, shared by that channel's participants, and resettable with
+`Castorice: reset percakapan`. Each member has an independent cooldown. A
+provider/configuration failure returns an honest error instead of a generated
+or template substitute. Logs contain only the provider name, operation, HTTP
+status when available, and a safe error category; they do not contain keys,
+headers, request payloads, or conversation text.
+
+HTTP 400 is reported as a request/configuration error; 401/403 as an
+authentication/access problem; 429 as quota or rate limit; 5xx and timeouts as
+temporary failures. Gemini API keys are never displayed in Discord or logs.
+An environment key being present is only a configuration check, not proof of
+connectivity or model access.
+
+AI Chat is available only when the bot owner enables global AI and a server
+administrator enables AI Chat for that server. Members can use the feature
+after both checks pass but cannot change either setting. Feature-specific
+commands are routed before conversational AI.
+
+Automated tests use mocks and do not make a live Gemini API request. Gemini
+authentication, model entitlement, quota, and response quality must be
+verified separately in an authorized staging environment before claiming
+live connectivity.

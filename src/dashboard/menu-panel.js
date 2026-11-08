@@ -15,6 +15,14 @@ const music = require("../music/manager");
 const { getGuildConfig } = require("../features/feature-manager");
 const { getAllFeatures } = require("../features/feature-registry");
 const voiceGreeter = require("../voice-ai/greeter");
+const { formatAIProviderStatus } = require("../ai/provider-settings");
+
+const SETTINGS_ACTION_IDS = Object.freeze({
+    tutor: "castorice:settings_tutor",
+    rate: "castorice:settings_rate",
+    suggestion: "castorice:settings_suggestion",
+    report: "castorice:settings_report"
+});
 
 const features = [
     { id: "music", label: "Music", implemented: true },
@@ -28,6 +36,16 @@ const features = [
     { id: "settings", label: "Settings", implemented: true },
     { id: "security_assistant", label: "Security Assistant", implemented: true },
     { id: "owner_panel", label: "Owner Panel", implemented: true }
+];
+
+const dashboardFeatures = [
+    { id: "music", label: "Music", implemented: true },
+    { id: "ai_chat", label: "AI", implemented: true },
+    { id: "translator", label: "Translator", implemented: true },
+    { id: "voice_manager", label: "Voice Manager", implemented: true },
+    { id: "voice_ai_center", label: "Voice AI Center", implemented: true },
+    { id: "playlists", label: "Playlists", implemented: true },
+    { id: "settings", label: "Settings", implemented: true }
 ];
 
 function getVoiceStats(guild) {
@@ -83,7 +101,7 @@ function buildDashboard(guild) {
                 inline: true
             },
             { name: "Kick Voice", value: "Belum diaktifkan", inline: true },
-            { name: "AI Service", value: "Belum dikonfigurasi", inline: true },
+            { name: "AI Service", value: "Cek Settings", inline: true },
             {
                 name: "Now Playing",
                 value: session?.currentTrack?.title || session?.currentTrack?.input || "Belum ada lagu diputar.",
@@ -94,18 +112,22 @@ function buildDashboard(guild) {
         .setTimestamp();
 
     const rows = [];
-    for (let index = 0; index < features.length; index += 3) {
+    for (let index = 0; index < dashboardFeatures.length; index += 3) {
         rows.push(
             new ActionRowBuilder().addComponents(
-                features.slice(index, index + 3).map(feature =>
+                dashboardFeatures.slice(index, index + 3).map(feature =>
                     new ButtonBuilder()
                         .setCustomId(
                             feature.id === "voice_manager"
                                 ? "voice:open"
+                                : feature.id === "voice_ai_center"
+                                    ? "voicecenter:open"
                                 : feature.id === "owner_panel"
                                     ? "owner:open"
                                     : feature.id === "playlists"
                                         ? "castorice:playlists"
+                                    : feature.id === "settings"
+                                        ? "castorice:settings"
                                     : feature.id === "voice_greeter"
                                         ? "castorice:feature_selection"
                                     : `castorice:${feature.id}`
@@ -652,13 +674,14 @@ function buildFeaturePanel(featureId) {
             embeds: [new EmbedBuilder()
                 .setColor(0x5865F2)
                 .setTitle("Castorice | Security Assistant")
-                .setDescription("Audit role dan permission overwrite channel untuk menemukan izin berisiko. Laporan bersifat informatif; audit tidak mengubah konfigurasi server atau menindak anggota.")
+                .setDescription("Audit role dan permission overwrite channel untuk menemukan izin berisiko. Monitor spam berjalan otomatis dalam mode alert-only. Moderasi destruktif hanya berjalan setelah kebijakan per-server dikonfirmasi; admin, moderator, bot, dan akun whitelist dikecualikan.")
                 .setFooter({ text: "Menjalankan audit memerlukan izin Manage Server." })
                 .setTimestamp()],
             components: [new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId("castorice:security_audit").setLabel("Jalankan Audit").setStyle(ButtonStyle.Primary),
                 new ButtonBuilder().setCustomId("castorice:security_history").setLabel("Riwayat Audit").setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId("castorice:security_policy").setLabel("Kebijakan Bot Offline").setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId("castorice:security_spam_policy").setLabel("Kebijakan Spam").setStyle(ButtonStyle.Danger),
                 new ButtonBuilder().setCustomId("castorice:home").setLabel("Dashboard").setStyle(ButtonStyle.Secondary)
             )]
         };
@@ -670,8 +693,8 @@ function buildFeaturePanel(featureId) {
                 .setColor(0x5865F2)
                 .setTitle("Castorice | AI")
                 .setDescription(
-                    "Aktifkan AI Chat melalui **Settings → Feature Selection**, lalu panggil `@Castorice` atau awali pesan dengan `Castorice:`.\n\n" +
-                    "Provider memerlukan konfigurasi `AI_API_KEY`, `AI_MODEL`, dan opsional `AI_BASE_URL` pada environment bot. Riwayat percakapan hanya disimpan sementara di memori dan dapat dihapus dengan `reset percakapan`."
+                    "AI Chat memerlukan AI global ON oleh pemilik bot dan AI Chat server ON oleh admin di **Settings**. Setelah itu panggil `@Castorice` atau awali pesan dengan `Castorice:`.\n\n" +
+                    "Castorice menggunakan Google Gemini untuk jawaban AI. Konfigurasikan `GEMINI_API_KEY`; `GEMINI_MODEL` opsional dan dapat ditemukan otomatis. Riwayat percakapan hanya disimpan sementara di memori dan dapat dihapus dengan `reset percakapan`."
                 )
                 .setFooter({ text: "Jangan kirim informasi sensitif ke provider AI." })
                 .setTimestamp()],
@@ -689,7 +712,7 @@ function buildFeaturePanel(featureId) {
                 .setTitle("Castorice | Voice AI")
                 .setDescription(
                     "Aktifkan **Voice AI** melalui **Settings → Feature Selection**. Setelah itu, masuk ke voice channel dan gunakan `@Castorice voice ai <pertanyaan>` atau `Castorice: jawab pakai suara <pertanyaan>`.\n\n" +
-                    "Fitur ini menghasilkan jawaban AI lalu membacakannya melalui TTS. Konfigurasikan AI_API_KEY, AI_MODEL, dan VOICE_GREETER_TTS_MODULE terlebih dahulu. Audio tidak akan memotong sesi musik atau koneksi voice bot yang sudah aktif."
+                    "Fitur ini menghasilkan jawaban menggunakan Google Gemini lalu membacakannya melalui TTS. Konfigurasikan `GEMINI_API_KEY` dan `VOICE_GREETER_TTS_MODULE` terlebih dahulu. Audio tidak akan memotong sesi musik atau koneksi voice bot yang sudah aktif."
                 )
                 .setFooter({ text: "Tidak menyediakan speech recognition atau live conversation." })
                 .setTimestamp()],
@@ -757,16 +780,22 @@ function buildSecurityReportPanel(report) {
     };
 }
 
-function buildSecurityHistoryPanel(reports = []) {
-    const lines = reports.slice(0, 10).map(report => {
+function buildSecurityHistoryPanel(reports = [], auditEvents = []) {
+    const reportLines = reports.slice(0, 10).map(report => {
         const { critical, high, medium, low } = report.summary;
         return `• **${report.scannedAt}** — ${critical} critical, ${high} high, ${medium} medium, ${low} low\n  Report ID: \`${report.id}\``;
     });
+    const eventLines = auditEvents.slice(0, 8).map(event =>
+        `• **${event.at}** — ${event.type}: ${(event.detail || "").slice(0, 220)}`
+    );
+    const sections = [];
+    if (reportLines.length) sections.push(`Laporan audit:\n${reportLines.join("\n")}`);
+    if (eventLines.length) sections.push(`Keputusan dan tindakan monitor:\n${eventLines.join("\n")}`);
     const embed = new EmbedBuilder()
         .setColor(0x5865F2)
         .setTitle("Castorice | Security Audit History")
-        .setDescription(lines.length ? lines.join("\n") : "Belum ada riwayat audit keamanan untuk server ini.")
-        .setFooter({ text: "Riwayat berisi maksimal 20 laporan per server; audit hanya membaca dan melaporkan." })
+        .setDescription(sections.length ? sections.join("\n\n") : "Belum ada riwayat audit atau tindakan keamanan untuk server ini.")
+        .setFooter({ text: "Riwayat audit dan tindakan dibatasi; pemeriksaan offline hanya melaporkan kandidat." })
         .setTimestamp();
     return {
         embeds: [embed],
@@ -841,6 +870,76 @@ function buildSecurityPolicyPreviewPanel(policy, confirmationId, requesterId) {
             new ButtonBuilder()
                 .setCustomId(`castorice:security_policy_confirm:${confirmationId}:${requesterId}`)
                 .setLabel(policy.enabled ? "Konfirmasi Kebijakan" : "Konfirmasi Nonaktifkan")
+                .setStyle(policy.enabled ? ButtonStyle.Danger : ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId("castorice:home")
+                .setLabel("Batal")
+                .setStyle(ButtonStyle.Secondary)
+        )]
+    };
+}
+
+function buildSecuritySpamPolicyModal(policy) {
+    const enabled = new TextInputBuilder()
+        .setCustomId("security_spam_enabled")
+        .setLabel("Moderasi destruktif ON atau OFF")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(3)
+        .setValue(policy.enabled ? "ON" : "OFF");
+    const deleteThreshold = new TextInputBuilder()
+        .setCustomId("security_spam_delete_threshold")
+        .setLabel("Hapus threshold pesan (3-20)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(2)
+        .setValue(String(policy.deleteThreshold));
+    const timeoutThreshold = new TextInputBuilder()
+        .setCustomId("security_spam_timeout_threshold")
+        .setLabel("Timeout threshold pesan (4-30)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(2)
+        .setValue(String(policy.timeoutThreshold));
+    const timeoutSeconds = new TextInputBuilder()
+        .setCustomId("security_spam_timeout_seconds")
+        .setLabel("Durasi timeout detik (60-2419200)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(7)
+        .setValue(String(policy.timeoutSeconds));
+    return new ModalBuilder()
+        .setCustomId("castorice:security_spam_policy_submit")
+        .setTitle("Kebijakan Moderasi Spam")
+        .addComponents(
+            new ActionRowBuilder().addComponents(enabled),
+            new ActionRowBuilder().addComponents(deleteThreshold),
+            new ActionRowBuilder().addComponents(timeoutThreshold),
+            new ActionRowBuilder().addComponents(timeoutSeconds)
+        );
+}
+
+function buildSecuritySpamPolicyPreviewPanel(policy, confirmationId, requesterId) {
+    const embed = new EmbedBuilder()
+        .setColor(policy.enabled ? 0xED4245 : 0x5865F2)
+        .setTitle("Castorice | Preview Kebijakan Spam")
+        .setDescription([
+            `Moderasi destruktif: **${policy.enabled ? "AKTIF setelah konfirmasi" : "NONAKTIF"}**`,
+            `Hapus pesan berulang mulai: **${policy.deleteThreshold}**`,
+            `Timeout mulai: **${policy.timeoutThreshold}**`,
+            `Durasi timeout: **${policy.timeoutSeconds} detik**`,
+            "",
+            "Observasi alert-only selalu berjalan tanpa kebijakan ini. Aktivasi hanya berlaku di server ini; feature guard, permission efektif per-channel, pengecualian moderator, whitelist, dan hierarchy bot tetap diwajibkan.",
+            "Keputusan audit disimpan sebelum tindakan. Jika audit storage gagal, tindakan dibatalkan."
+        ].join("\n"))
+        .setFooter({ text: "Konfirmasi administrator yang membuat preview, berlaku 5 menit." })
+        .setTimestamp();
+    return {
+        embeds: [embed],
+        components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`castorice:security_spam_policy_confirm:${confirmationId}:${requesterId}`)
+                .setLabel(policy.enabled ? "Konfirmasi Moderasi" : "Konfirmasi Nonaktifkan")
                 .setStyle(policy.enabled ? ButtonStyle.Danger : ButtonStyle.Secondary),
             new ButtonBuilder()
                 .setCustomId("castorice:home")
@@ -1114,43 +1213,72 @@ function buildPlaylistPanel(guildId, playlistData, page = 0, notice = "") {
     return { embeds: [embed], components: rows };
 }
 
-async function buildSettingsPanel() {
+async function buildSettingsPanel({
+    guildId = null,
+    canManageGuild = true,
+    globalAIEnabled = null,
+    serverAIEnabled = null,
+    providerStatus = null,
+    isOwner = false
+} = {}) {
+    const globalStatus = globalAIEnabled === null
+        ? "belum diperiksa"
+        : globalAIEnabled
+            ? "AKTIF"
+            : "NONAKTIF";
+    const serverStatus = serverAIEnabled === null
+        ? "belum diperiksa"
+        : serverAIEnabled
+            ? "AKTIF"
+            : "NONAKTIF";
+    const providerSummary = providerStatus?.configurationError
+        ? "Konfigurasi Gemini tidak valid. Periksa GEMINI_API_KEY, GEMINI_MODEL, dan AI_TIMEOUT_MS."
+        : providerStatus
+            ? formatAIProviderStatus(providerStatus)
+        : "Status provider belum diperiksa. Status konfigurasi tidak menampilkan kredensial dan bukan bukti koneksi live.";
     const embed = new EmbedBuilder()
         .setColor(0x5865F2)
         .setTitle("Castorice | Settings")
         .setDescription(
             "Pengaturan dan bantuan untuk server ini.\n\n" +
-            "**Pilih pengaturan yang ingin dibuka:**"
+            `**AI global:** ${globalStatus}\n` +
+            `**AI Chat server ini:** ${serverStatus}\n\n` +
+            `${providerSummary}\n\n` +
+            (globalAIEnabled === false
+                ? "AI Chat hanya dapat digunakan jika pemilik bot mengaktifkan AI global dan admin server mengaktifkan AI Chat."
+                : "Pilih pengaturan yang ingin dibuka:")
         )
         .setFooter({ text: "Castorice | Settings" })
         .setTimestamp();
 
-    const row = new ActionRowBuilder().addComponents(
+    const settingsButtons = [
         new ButtonBuilder()
-            .setCustomId("castorice:settings_tutor")
+            .setCustomId(SETTINGS_ACTION_IDS.tutor)
             .setLabel("Tutor")
             .setStyle(ButtonStyle.Secondary),
 
         new ButtonBuilder()
-            .setCustomId("castorice:settings_rate")
+            .setCustomId(SETTINGS_ACTION_IDS.rate)
             .setLabel("Rate Bot")
             .setStyle(ButtonStyle.Secondary),
 
         new ButtonBuilder()
-            .setCustomId("castorice:settings_suggestion")
+            .setCustomId(SETTINGS_ACTION_IDS.suggestion)
             .setLabel("Saran")
             .setStyle(ButtonStyle.Secondary),
 
         new ButtonBuilder()
-            .setCustomId("castorice:settings_report")
+            .setCustomId(SETTINGS_ACTION_IDS.report)
             .setLabel("Report Bug")
-            .setStyle(ButtonStyle.Secondary),
-
-        new ButtonBuilder()
+            .setStyle(ButtonStyle.Secondary)
+    ];
+    if (canManageGuild) {
+        settingsButtons.push(new ButtonBuilder()
             .setCustomId("castorice:feature_selection")
             .setLabel("Feature Selection")
-            .setStyle(ButtonStyle.Primary)
-    );
+            .setStyle(ButtonStyle.Primary));
+    }
+    const row = new ActionRowBuilder().addComponents(settingsButtons);
 
     const backRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -1158,11 +1286,67 @@ async function buildSettingsPanel() {
             .setLabel("Dashboard")
             .setStyle(ButtonStyle.Primary)
     );
+    const controlRows = [row];
+    if (guildId && canManageGuild) {
+        controlRows.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId("castorice:ai_server_toggle")
+                .setLabel(`AI Chat server: ${serverAIEnabled ? "ON" : "OFF"}`)
+                .setStyle(serverAIEnabled ? ButtonStyle.Success : ButtonStyle.Danger)
+                .setDisabled(!globalAIEnabled && !serverAIEnabled)
+        ));
+    }
+    if (isOwner) {
+        controlRows.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId("castorice:ai_global_open")
+                .setLabel("Owner: Global AI Settings")
+                .setStyle(ButtonStyle.Primary)
+        ));
+    }
 
     return {
         embeds: [embed],
-        components: [row, backRow]
+        components: [...controlRows, backRow]
     };
+}
+
+function buildGlobalAISettingsPanel({ settings, providerStatus }) {
+    if (!settings || typeof settings.enabled !== "boolean" ||
+        !providerStatus || typeof providerStatus.configured !== "boolean") {
+        throw new TypeError("Global AI settings panel data is invalid.");
+    }
+    const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle("Castorice | Global AI Control")
+        .setDescription([
+            `AI global: **${settings.enabled ? "AKTIF" : "NONAKTIF"}**`,
+            providerStatus.configurationError
+                ? "Konfigurasi Gemini tidak valid; periksa GEMINI_API_KEY, GEMINI_MODEL, dan AI_TIMEOUT_MS."
+                : formatAIProviderStatus(providerStatus),
+            "Gemini adalah satu-satunya provider AI. Kredensial tetap berasal dari konfigurasi proses dan tidak dapat dilihat melalui Discord. Status konfigurasi bukan verifikasi koneksi live."
+        ].join("\n\n"))
+        .setFooter({ text: "Kontrol global khusus pemilik bot." })
+        .setTimestamp();
+    const rows = [
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId("castorice:ai_global_toggle")
+                .setLabel(`AI Global: ${settings.enabled ? "ON" : "OFF"}`)
+                .setStyle(settings.enabled ? ButtonStyle.Success : ButtonStyle.Danger)
+        )
+    ];
+    rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId("castorice:settings")
+            .setLabel("Settings")
+            .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId("castorice:home")
+            .setLabel("Dashboard")
+            .setStyle(ButtonStyle.Primary)
+    ));
+    return { embeds: [embed], components: rows };
 }
 
 function buildVoiceGreeterModal(greeting = voiceGreeter.DEFAULT_GREETING) {
@@ -1181,7 +1365,7 @@ function buildVoiceGreeterModal(greeting = voiceGreeter.DEFAULT_GREETING) {
     return modal.addComponents(new ActionRowBuilder().addComponents(input));
 }
 
-async function buildFeatureSelectionPanel(guildId) {
+async function buildFeatureSelectionPanel(guildId, { globalAIEnabled = true } = {}) {
     const config = await getGuildConfig(guildId);
     const definitions = getAllFeatures();
 
@@ -1204,9 +1388,12 @@ async function buildFeatureSelectionPanel(guildId) {
             rowFeatures.map(feature => {
                 const enabled = feature.implemented &&
                     config.features[feature.id] === true;
+                const blockedByGlobalAI = feature.id === "ai_chat" && !globalAIEnabled;
 
                 const label = !feature.implemented
                     ? `${feature.label}: SOON`
+                    : blockedByGlobalAI
+                        ? "AI: GLOBAL OFF"
                     : `${feature.label}: ${enabled ? "ON" : "OFF"}`;
 
                 return new ButtonBuilder()
@@ -1219,7 +1406,7 @@ async function buildFeatureSelectionPanel(guildId) {
                                 ? ButtonStyle.Success
                                 : ButtonStyle.Danger
                     )
-                    .setDisabled(!feature.implemented);
+                    .setDisabled(!feature.implemented || blockedByGlobalAI);
             })
         );
 
@@ -1253,6 +1440,7 @@ async function buildFeatureSelectionPanel(guildId) {
     };
 }
 module.exports = {
+    SETTINGS_ACTION_IDS,
     buildDashboard,
     buildMusicPanel,
     buildQueuePanel,
@@ -1268,6 +1456,7 @@ module.exports = {
     buildSearchResultsPanel,
     buildFeaturePanel,
     buildSettingsPanel,
+    buildGlobalAISettingsPanel,
     buildFeatureSelectionPanel,
     buildVoiceGreeterModal,
     buildServerTemplatesPanel,
@@ -1278,5 +1467,7 @@ module.exports = {
     buildSecurityReportPanel,
     buildSecurityHistoryPanel,
     buildSecurityPolicyModal,
-    buildSecurityPolicyPreviewPanel
+    buildSecurityPolicyPreviewPanel,
+    buildSecuritySpamPolicyModal,
+    buildSecuritySpamPolicyPreviewPanel
 };

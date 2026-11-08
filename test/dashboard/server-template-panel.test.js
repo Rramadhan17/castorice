@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+    buildDashboard,
     buildFeaturePanel,
     buildServerTemplatesPanel,
     buildServerTemplateCreateModal,
@@ -9,25 +10,21 @@ const {
     buildServerTemplateDeleteConfirmPanel
 } = require("../../src/dashboard/menu-panel");
 
-test("Server Templates Dashboard exposes snapshot, refresh, and preview controls", () => {
+test("Dashboard hides Server Templates controls and keeps the backend available for AI-driven flows", () => {
+    const dashboard = buildDashboard({
+        id: "12345678901234567",
+        voiceStates: { cache: { filter: () => ({ size: 0 }) } },
+        channels: { cache: { filter: () => ({ size: 0 }) } },
+        members: { me: { voice: { channel: null } } }
+    });
+    const buttons = dashboard.components.flatMap(row => row.components.map(button => button.toJSON()));
+
+    assert.equal(buttons.some(button => button.custom_id === "castorice:server_templates"), false);
+    assert.equal(buttons.some(button => button.custom_id === "castorice:templates_open"), false);
+
     const featurePanel = buildFeaturePanel("server_templates");
     const featureButtons = featurePanel.components.flatMap(row => row.components.map(button => button.toJSON()));
     assert.equal(featureButtons.some(button => button.custom_id === "castorice:templates_open"), true);
-
-    const panel = buildServerTemplatesPanel("12345678901234567", [{
-        id: "template-1",
-        name: "Community",
-        roleCount: 4,
-        channelCount: 8,
-        sourceGuildId: "12345678901234567"
-    }]);
-    const buttons = panel.components.flatMap(row => row.components.map(button => button.toJSON()));
-    assert.equal(buttons.some(button => button.custom_id === "castorice:template_create"), true);
-    assert.equal(buttons.some(button => button.custom_id === "castorice:template_preview_open"), true);
-    const deleteSelect = panel.components[0].components[0].toJSON();
-    assert.equal(deleteSelect.custom_id, "castorice:template_delete_select");
-    assert.deepEqual(deleteSelect.options.map(option => option.value), ["template-1"]);
-    assert.match(panel.embeds[0].data.description, /template-1/);
 });
 
 test("Server Template deletion requires a bound confirmation and warns that only the snapshot is deleted", () => {

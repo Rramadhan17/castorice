@@ -1,4 +1,5 @@
 const { PermissionFlagsBits, ChannelType } = require("discord.js");
+const { randomUUID } = require("node:crypto");
 
 const ID = /^\d{17,20}$/;
 const VOICE_CHANNEL_TYPES = new Set([ChannelType.GuildVoice, ChannelType.GuildStageVoice]);
@@ -14,6 +15,7 @@ function permissionsFor(member) {
 
 function createVoiceManager({ stateStore, clock = () => Date.now() }) {
     if (!stateStore) throw new TypeError("stateStore wajib diisi.");
+    const channelCreationRequests = new Map();
 
     function assertGuild(guild, guildId) {
         assertId(guildId, "Guild ID");
@@ -38,6 +40,83 @@ function createVoiceManager({ stateStore, clock = () => Date.now() }) {
             throw new Error("Anggota harus berasal dari guild yang sama.");
         }
         return id;
+    }
+
+    async function createVoiceChannel(guild, guildId, member, options = {}) {
+        assertGuild(guild, guildId);
+        const creatorId = assertMember(guild, member);
+        const name = typeof options.name === "string"
+            ? options.name.trim().replace(/\s+/g, " ")
+            : "";
+        if (!name || name.length > 100) {
+            throw new Error("Nama voice channel harus berisi 1 sampai 100 karakter.");
+        }
+        const privacy = options.privacy ?? "public";
+        if (!new Set(["public", "private"]).has(privacy)) {
+            throw new Error("Permission voice channel harus public atau private.");
+        }
+        const userLimit = options.userLimit ?? 0;
+        if (!Number.isInteger(userLimit) || userLimit < 0 || userLimit > 99) {
+            throw new Error("Member limit harus antara 0 sampai 99.");
+        }
+        const botMember = assertBotPermissions(guild);
+        let parent = null;
+        if (options.categoryId) {
+            const categoryId = assertId(options.categoryId, "Category ID");
+            parent = await guild.channels.fetch(categoryId).catch(() => null);
+            if (!parent || parent.type !== ChannelType.GuildCategory ||
+                String(parent.guildId ?? parent.guild?.id) !== String(guildId)) {
+                throw new Error("Kategori tidak ditemukan di server ini.");
+            }
+            if (parent.permissionsFor &&
+                !parent.permissionsFor(botMember)?.has?.(PermissionFlagsBits.ManageChannels)) {
+                throw new Error("Bot memerlukan permission Manage Channels pada kategori tersebut.");
+            }
+        }
+
+        const requestKey = String(options.requestKey || randomUUID());
+        if (requestKey.length > 100) throw new Error("Kunci permintaan pembuatan channel tidak valid.");
+        const cacheKey = `${guildId}:${creatorId}:${requestKey}`;
+        const now = clock();
+        for (const [key, request] of channelCreationRequests) {
+            if (request.expiresAt <= now) channelCreationRequests.delete(key);
+        }
+        const existing = channelCreationRequests.get(cacheKey);
+        if (existing) return existing.promise;
+        if (channelCreationRequests.size >= 1000) {
+            const oldest = channelCreationRequests.keys().next().value;
+            if (oldest) channelCreationRequests.delete(oldest);
+        }
+
+        const overwrites = privacy === "private"
+            ? [
+                { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.Connect] },
+                { id: creatorId, allow: [PermissionFlagsBits.Connect, PermissionFlagsBits.ViewChannel] },
+                { id: botMember.id, allow: [PermissionFlagsBits.Connect, PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageChannels] }
+            ]
+            : undefined;
+        const promise = (async () => {
+            const channel = await guild.channels.create({
+                name,
+                type: ChannelType.GuildVoice,
+                parent: parent?.id ?? undefined,
+                userLimit,
+                ...(overwrites ? { permissionOverwrites: overwrites } : {})
+            });
+            if (!ID.test(String(channel?.id ?? "")) ||
+                String(channel.guildId ?? channel.guild?.id) !== String(guildId) ||
+                channel.type !== ChannelType.GuildVoice) {
+                throw new Error("Discord tidak mengonfirmasi voice channel yang dibuat di server ini.");
+            }
+            return channel;
+        })();
+        channelCreationRequests.set(cacheKey, { promise, expiresAt: now + 30_000 });
+        promise.catch(() => {
+            if (channelCreationRequests.get(cacheKey)?.promise === promise) {
+                channelCreationRequests.delete(cacheKey);
+            }
+        });
+        return promise;
     }
 
     async function getOwned(guild, guildId, member) {
@@ -298,7 +377,7 @@ function createVoiceManager({ stateStore, clock = () => Date.now() }) {
         }
     }
 
-    return { createTemporaryVoice, rename, setLimit, setLocked, transfer, deleteOwned, onMemberLeave, onMemberJoin, cleanupDue };
+    return { createTemporaryVoice, createVoiceChannel, rename, setLimit, setLocked, transfer, deleteOwned, onMemberLeave, onMemberJoin, cleanupDue };
 }
 
 module.exports = { createVoiceManager };

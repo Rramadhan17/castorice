@@ -4,8 +4,8 @@
  * Strictly boundary-aware and ignores bots/webhooks.
  */
 
-const LEADING_NAME_REGEX = /^(?:(?:hey|hai|halo|hi|hello)\s+)?castorice[\s,;:]+\s*(.*)$/i;
-const STANDALONE_NAME_REGEX = /^(?:(?:hey|hai|halo|hi|hello)\s+)?castorice$/i;
+const LEADING_NAME_REGEX = /^(?:(?:hey|hai|halo|hi|hello)\s+)?castorice(?:[\s,;:!?]+|\s*[.]{1,3}\s*|\s+)?\s*(.*)$/i;
+const STANDALONE_NAME_REGEX = /^(?:(?:hey|hai|halo|hi|hello)\s+)?castorice(?:[!?.]+)?$/i;
 
 function extractTrigger(message, clientUser = null) {
     if (!message || typeof message.content !== "string") {

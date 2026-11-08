@@ -26,8 +26,13 @@ test("Voice Greeter configuration persists, validates limits, and personalizes m
     const userId = "12345678901234567";
     const state = {
         channelId: "voice-1",
-        channel: { async send(payload) { sent.push(payload); } },
-        guild: { id: guildId },
+        channel: {
+            id: "greeter-config-text-channel",
+            isTextBased: () => true,
+            permissionsFor: () => ({ has: () => true }),
+            async send(payload) { sent.push(payload); }
+        },
+        guild: { id: guildId, members: { me: {} } },
         member: { user: { bot: false } },
         id: userId
     };

@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { PermissionFlagsBits } = require("discord.js");
 const { createVoiceManager } = require("../../src/voice-ai/manager-service");
 
 const G = "12345678901234567", O = "22345678901234567", T = "32345678901234567", C = "42345678901234567";
@@ -27,9 +28,10 @@ function fixture() {
     };
     const target = { id: T, guild: { id: G }, voice: { channelId: C } };
     const member = { id: O, guild: { id: G }, displayName: "Owner", user: { username: "owner" }, voice: { channel: { id: "52345678901234567", guildId: G, type: 2, parent: null }, setChannel: async c => (moved = c.id) } };
-    const guild = { id: G, roles: { everyone: { id: G } }, members: { me: { id: "62345678901234567", permissions: perms }, fetch: async id => id === T ? target : member }, channels: { fetch: async id => id === C ? channel : null, create: async () => channel } };
+    let createdChannelOptions = null;
+    const guild = { id: G, roles: { everyone: { id: G } }, members: { me: { id: "62345678901234567", permissions: perms }, fetch: async id => id === T ? target : member }, channels: { fetch: async id => id === C ? channel : null, create: async options => (createdChannelOptions = options, channel) } };
     const service = createVoiceManager({ stateStore: store, clock: () => now });
-    return { service, store, guild, member, channel, target, overwriteEdits, get state() { return state; }, get deleted() { return deleted; }, get moved() { return moved; }, advance: ms => now += ms };
+    return { service, store, guild, member, channel, target, overwriteEdits, get createdChannelOptions() { return createdChannelOptions; }, get state() { return state; }, get deleted() { return deleted; }, get moved() { return moved; }, advance: ms => now += ms };
 }
 
 test("creates voice only from same guild voice channel and records owner", async () => {
@@ -38,6 +40,24 @@ test("creates voice only from same guild voice channel and records owner", async
     assert.equal(channel.id, C);
     assert.equal(f.moved, C);
     assert.equal(f.state.temporaryVoices[C].ownerId, O);
+});
+
+test("creates a regular voice channel without moving the requester", async () => {
+    const f = fixture();
+    const channel = await f.service.createVoiceChannel(f.guild, G, f.member, {
+        name: "Study Room",
+        privacy: "private",
+        userLimit: 4,
+        requestKey: "create-request-1"
+    });
+    assert.equal(channel.id, C);
+    assert.equal(f.moved, null);
+    assert.equal(f.state.temporaryVoices[C], undefined);
+    assert.equal(f.createdChannelOptions.name, "Study Room");
+    assert.equal(f.createdChannelOptions.userLimit, 4);
+    const everyoneOverwrite = f.createdChannelOptions.permissionOverwrites.find(overwrite => overwrite.id === G);
+    assert.ok(everyoneOverwrite.deny.includes(PermissionFlagsBits.Connect));
+    assert.equal(f.createdChannelOptions.permissionOverwrites.some(overwrite => overwrite.id === O), true);
 });
 
 test("owner can rename, set limit, lock and transfer to present guild member", async () => {

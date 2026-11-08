@@ -1,8 +1,9 @@
 ﻿const fs = require("node:fs/promises");
 const path = require("node:path");
-const { Events } = require("discord.js");
+const { Events, PermissionFlagsBits } = require("discord.js");
 const { checkFeature } = require("../core/feature-guard");
 const { loadTtsProvider, playTtsGreeting } = require("./greeter-tts");
+const { buildVoiceGreeterHelpCenter } = require("../dashboard/voice-greeter-help-center");
 
 const DATA_DIRECTORY = path.resolve(__dirname, "../../data/guilds");
 const COOLDOWN_MS = 5 * 60 * 1000;
@@ -13,6 +14,7 @@ const cache = new Map();
 const loading = new Map();
 const writeQueues = new Map();
 const activeGreetings = new Set();
+const permissionWarnings = new Set();
 
 let tempFileCounter = 0;
 
@@ -139,14 +141,90 @@ function saveGuildData(guildId, data) {
     });
 }
 
-async function handleVoiceStateUpdate(oldState, newState, { ttsProvider = null, voiceRuntime = {} } = {}) {
+function getGreetingChannelPermissions(channel, guild) {
+    let supportsText = typeof channel?.send === "function";
+    try {
+        if (typeof channel?.isTextBased === "function") {
+            supportsText = supportsText && channel.isTextBased();
+        }
+    } catch {
+        supportsText = false;
+    }
+    if (!supportsText) {
+        return { supported: false, permissions: null, missing: ["text_channel"] };
+    }
+    const botMember = guild?.members?.me;
+    if (!botMember || typeof channel.permissionsFor !== "function") {
+        return { supported: true, permissions: null, missing: ["permissions_unavailable"] };
+    }
+
+    try {
+        const permissions = channel.permissionsFor(botMember);
+        if (!permissions || typeof permissions.has !== "function") {
+            return { supported: true, permissions: null, missing: ["permissions_unavailable"] };
+        }
+        const required = [
+            ["ViewChannel", PermissionFlagsBits.ViewChannel],
+            ["SendMessages", PermissionFlagsBits.SendMessages],
+            ["EmbedLinks", PermissionFlagsBits.EmbedLinks]
+        ];
+        return {
+            supported: true,
+            permissions,
+            missing: required
+                .filter(([, flag]) => !permissions.has(flag))
+                .map(([name]) => name)
+        };
+    } catch {
+        return { supported: true, permissions: null, missing: ["permissions_unavailable"] };
+    }
+}
+
+function warnPermissionIssue(channel, permission) {
+    const key = `${channel?.id || "unknown"}:${permission}`;
+    if (permissionWarnings.has(key)) return;
+    permissionWarnings.add(key);
+    console.warn("[Voice Greeter] Greeting skipped or simplified due to channel permissions.", {
+        missingPermission: permission
+    });
+}
+
+function clearPermissionWarning(channel, permission) {
+    permissionWarnings.delete(`${channel?.id || "unknown"}:${permission}`);
+}
+
+function isMissingPermissionsError(error) {
+    return error?.code === 50013 ||
+        error?.code === "50013" ||
+        error?.rawError?.code === 50013 ||
+        error?.rawError?.code === "50013";
+}
+
+async function handleVoiceStateUpdate(oldState, newState, { ttsProvider = null, voiceRuntime = {}, buildHelpCenter } = {}) {
     if (oldState.channelId || !newState.channelId) return;
     if (!newState.guild || !newState.member) return;
     if (newState.member.user.bot) return;
 
     const channel = newState.channel;
 
-    if (!channel || typeof channel.send !== "function") return;
+    if (!channel) return;
+    const channelAccess = getGreetingChannelPermissions(channel, newState.guild);
+    if (!channelAccess.supported) {
+        warnPermissionIssue(channel, "text_channel");
+        return;
+    }
+    for (const missingPermission of channelAccess.missing) {
+        warnPermissionIssue(channel, missingPermission);
+    }
+    if (channelAccess.missing.some(permission =>
+        permission === "ViewChannel" ||
+        permission === "SendMessages" ||
+        permission === "permissions_unavailable"
+    )) {
+        return;
+    }
+    clearPermissionWarning(channel, "ViewChannel");
+    clearPermissionWarning(channel, "SendMessages");
 
     const guildId = newState.guild.id;
     const memberId = newState.id;
@@ -179,9 +257,27 @@ async function handleVoiceStateUpdate(oldState, newState, { ttsProvider = null, 
             .replace(/@here/gi, "@\u200Bhere")
             .replaceAll("{user}", `<@${memberId}>`);
 
+        let helpCenter;
+        try {
+            helpCenter = (buildHelpCenter || buildVoiceGreeterHelpCenter)();
+        } catch (error) {
+            console.error("[Voice Greeter Help Center] Panel could not be created; sending greeting without it.", error);
+        }
+
+        if (channelAccess.missing.includes("EmbedLinks")) {
+            warnPermissionIssue(channel, "EmbedLinks");
+            if (helpCenter && Array.isArray(helpCenter.embeds)) {
+                helpCenter = { ...helpCenter };
+                delete helpCenter.embeds;
+            }
+        } else {
+            clearPermissionWarning(channel, "EmbedLinks");
+        }
+
         try {
             await channel.send({
                 content: greeting,
+                ...(helpCenter || {}),
                 allowedMentions: {
                     parse: [],
                     users: [memberId]
@@ -193,6 +289,10 @@ async function handleVoiceStateUpdate(oldState, newState, { ttsProvider = null, 
                 await saveGuildData(guildId, data);
             }
 
+            if (isMissingPermissionsError(error)) {
+                warnPermissionIssue(channel, "Discord rejected greeting send");
+                return;
+            }
             throw error;
         }
 
@@ -216,7 +316,14 @@ async function handleVoiceStateUpdate(oldState, newState, { ttsProvider = null, 
             }
         }
     } catch (error) {
-        console.error("[Voice Greeter Error]", error);
+        if (isMissingPermissionsError(error)) {
+            warnPermissionIssue(channel, "Discord rejected greeting send");
+        } else {
+            console.error("[Voice Greeter Error]", {
+                category: "greeting_failed",
+                code: Number.isInteger(error?.code) ? error.code : null
+            });
+        }
     } finally {
         activeGreetings.delete(key);
     }

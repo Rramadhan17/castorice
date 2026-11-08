@@ -5,7 +5,11 @@ const os = require("node:os");
 const path = require("node:path");
 const { PermissionFlagsBits } = require("discord.js");
 const { JsonGuildStore } = require("../../src/storage/json-guild-store");
-const { createSecurityAssistant } = require("../../src/security/assistant");
+const {
+    DEFAULT_SPAM_POLICY,
+    createSecurityAssistant,
+    validateSpamPolicy
+} = require("../../src/security/assistant");
 
 const guildId = "12345678901234567";
 const actor = { guild: { id: guildId }, permissions: { has: bit => bit === PermissionFlagsBits.ManageGuild } };
@@ -80,6 +84,62 @@ test("offline policy requires explicit offline samples, continuity, exclusions, 
         store: new JsonGuildStore({ rootDir }),
         now: () => new Date(time).toISOString(),
         id: () => `id-${++sequence}`
+    });
+
+    test("spam moderation policy is guild-scoped, disabled by default, and audit-confirmed", async t => {
+        const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "castorice-security-spam-policy-"));
+        t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+        const service = createSecurityAssistant({ store: new JsonGuildStore({ rootDir }) });
+        const otherGuildId = "62345678901234567";
+        const guild = { id: guildId };
+        const admin = {
+            id: "52345678901234567",
+            guild: { id: guildId },
+            permissions: { has: flag => flag === PermissionFlagsBits.ManageGuild }
+        };
+
+        assert.deepEqual(await service.getSpamPolicy(guildId), DEFAULT_SPAM_POLICY);
+        const policy = await service.setSpamPolicy(guild, admin, {
+            enabled: true,
+            deleteThreshold: 4,
+            timeoutThreshold: 9,
+            timeoutSeconds: 120
+        });
+        assert.equal(policy.enabled, true);
+        assert.deepEqual(await service.getSpamPolicy(otherGuildId), DEFAULT_SPAM_POLICY);
+        const events = await service.listAuditLog(guildId);
+        assert.equal(events[0].type, "spam_policy_change_authorized");
+        assert.equal(events[0].actorId, admin.id);
+        assert.throws(() => validateSpamPolicy({
+            enabled: true,
+            deleteThreshold: 9,
+            timeoutThreshold: 8,
+            timeoutSeconds: 60
+        }), /threshold timeout/i);
+        await assert.rejects(service.setSpamPolicy(guild, {
+            ...admin,
+            permissions: { has: () => false }
+        }, policy), /Manage Server/i);
+    });
+
+    test("spam moderation policy fails closed when authorization audit cannot be persisted", async () => {
+        let policyWrites = 0;
+        const service = createSecurityAssistant({
+            store: {
+                update: async (_guildId, collection) => {
+                    if (collection === "security_audit_log") throw new Error("audit write failure");
+                    if (collection === "security_spam_policy") policyWrites += 1;
+                }
+            }
+        });
+        const guild = { id: guildId };
+        await assert.rejects(service.setSpamPolicy(guild, actor, {
+            enabled: true,
+            deleteThreshold: 5,
+            timeoutThreshold: 8,
+            timeoutSeconds: 60
+        }), /audit write failure/);
+        assert.equal(policyWrites, 0);
     });
     const bot = {
         id: "32345678901234567",

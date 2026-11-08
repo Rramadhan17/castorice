@@ -3,115 +3,49 @@ const http = require("node:http");
 const https = require("node:https");
 const net = require("node:net");
 const { randomUUID } = require("node:crypto");
+const {
+    createPinnedLookup,
+    isPublicIp,
+    normalizeHostname,
+    parseExternalHttpUrl,
+    resolvePublicAddresses
+} = require("./url-security");
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 4;
 const MAX_CLIENTS = 2;
 
-function withTimeout(promise, timeoutMs, message) {
-    let timer;
-    return Promise.race([
-        promise,
-        new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-        })
-    ]).finally(() => clearTimeout(timer));
-}
-
 function isPublicIpv4(address) {
-    if (net.isIP(address) !== 4) return false;
-    const [a, b, c, d] = address.split(".").map(Number);
-    if ([a, b, c, d].some(value => !Number.isInteger(value) || value < 0 || value > 255)) {
-        return false;
-    }
-    return !(
-        a === 0 ||
-        a === 10 ||
-        a === 127 ||
-        a >= 224 ||
-        (a === 100 && b >= 64 && b <= 127) ||
-        (a === 169 && b === 254) ||
-        (a === 172 && b >= 16 && b <= 31) ||
-        (a === 192 && (
-            b === 0 ||
-            (b === 88 && c === 99) ||
-            b === 168
-        )) ||
-        (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
-        (a === 203 && b === 0 && c === 113) ||
-        (a === 255 && b === 255 && c === 255 && d === 255)
-    );
+    return net.isIP(address) === 4 && isPublicIp(address);
 }
 
 function parseRadioUrl(value) {
-    let url;
-    try {
-        url = new URL(value);
-    } catch {
-        throw new Error("Radio stream URL is invalid.");
-    }
-    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    if (
-        !["http:", "https:"].includes(url.protocol) ||
-        url.username ||
-        url.password ||
-        !host ||
-        host === "localhost" ||
-        host.endsWith(".localhost") ||
-        host.endsWith(".local") ||
-        host.endsWith(".internal") ||
-        net.isIP(host) === 6
-    ) {
-        throw new Error("Radio stream URL protocol or host is not allowed.");
-    }
-    if (net.isIP(host) === 4 && !isPublicIpv4(host)) {
-        throw new Error("Private or reserved radio stream addresses are not allowed.");
+    const url = parseExternalHttpUrl(value);
+    const host = normalizeHostname(url.hostname);
+    if (net.isIP(host) === 6) {
+        throw new Error("Radio streams require a public IPv4 hostname or address.");
     }
     return url;
 }
 
 async function resolvePublicIpv4(url, lookup = dns.lookup, timeoutMs = DEFAULT_TIMEOUT_MS) {
-    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    if (net.isIP(host) === 4) {
-        if (!isPublicIpv4(host)) {
-            throw new Error("Private or reserved radio stream addresses are not allowed.");
-        }
-        return host;
-    }
-
     let addresses;
     try {
-        addresses = await withTimeout(
-            lookup(host, { all: true, family: 4, verbatim: true }),
-            timeoutMs,
-            "Radio stream DNS lookup timed out."
-        );
+        addresses = await resolvePublicAddresses(url.hostname, lookup, timeoutMs);
     } catch (error) {
-        if (error.message === "Radio stream DNS lookup timed out.") throw error;
-        throw new Error("Radio stream hostname could not be resolved.");
-    }
-    if (!Array.isArray(addresses) || addresses.length === 0) {
-        throw new Error("Radio stream hostname has no public IPv4 address.");
-    }
-    const unique = [...new Set(addresses.map(item => item.address))];
-    if (unique.some(address => !isPublicIpv4(address))) {
+        if (error.message === "DNS lookup timed out.") {
+            throw new Error("Radio stream DNS lookup timed out.");
+        }
+        if (/cannot be resolved|could not be resolved|resolve/i.test(error.message)) {
+            throw new Error("Radio stream hostname could not be resolved.");
+        }
         throw new Error("Radio stream hostname resolved to a private or reserved address.");
     }
-    return unique[0];
-}
-
-function createPinnedLookup(hostname, address) {
-    return (requestedHostname, options, callback) => {
-        if (requestedHostname.toLowerCase() !== hostname.toLowerCase()) {
-            callback(new Error("Radio stream DNS pin mismatch."));
-            return;
-        }
-        if (options?.all) {
-            callback(null, [{ address, family: 4 }]);
-        } else {
-            callback(null, address, 4);
-        }
-    };
+    const ipv4 = addresses.find(record => record.family === 4);
+    if (!ipv4) {
+        throw new Error("Radio stream hostname has no public IPv4 address.");
+    }
+    return ipv4.address;
 }
 
 function createRadioStreamProxy({

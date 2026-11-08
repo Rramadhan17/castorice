@@ -13,6 +13,7 @@ test("security tag parser recognizes audit requests", () => {
     assert.equal(parseSecurityIntent("security").type, "help");
     assert.equal(parseSecurityIntent("riwayat audit keamanan").type, "history");
     assert.equal(parseSecurityIntent("kebijakan keamanan").type, "policy");
+    assert.equal(parseSecurityIntent("kebijakan moderasi spam").type, "spam_policy");
     assert.equal(parseSecurityIntent("play music").type, "unknown");
 });
 
@@ -68,6 +69,14 @@ test("security tag router lists existing reports without starting another audit"
                 assert.equal(guildId, "12345678901234567");
                 listCalls += 1;
                 return [report];
+            },
+            listAuditLog: async guildId => {
+                assert.equal(guildId, "12345678901234567");
+                return [{
+                    at: "2026-11-06T12:01:00.000Z",
+                    type: "spam_message_deleted",
+                    detail: "member=22345678901234567; count=5"
+                }];
             }
         },
         featureGuard: async () => ({ allowed: true })
@@ -84,6 +93,7 @@ test("security tag router lists existing reports without starting another audit"
     assert.equal(await route({ message, commandText: "riwayat audit" }), true);
     assert.equal(listCalls, 1);
     assert.match(reply.content, /1 critical, 2 high, 3 medium, 4 low/);
+    assert.match(reply.content, /spam_message_deleted/);
     assert.deepEqual(reply.allowedMentions, { parse: [] });
     assert.equal(formatSecurityHistory([]), "Belum ada riwayat audit keamanan untuk server ini.");
 });
@@ -102,6 +112,29 @@ test("security AI Tag reports the alert-only policy and links to guarded Dashboa
             getPolicy: async () => policy
         },
         featureGuard: async () => ({ allowed: true })
+    });
+
+    test("security AI Tag links administrators to per-guild spam policy preview", async () => {
+        let reply;
+        const route = createSecurityTagRouter({
+            service: { audit: async () => assert.fail("policy route must not start an audit") },
+            featureGuard: async () => ({ allowed: true })
+        });
+        const message = {
+            guild: {
+                id: "12345678901234567",
+                members: { fetch: async () => ({
+                    permissions: { has: bit => bit === PermissionFlagsBits.ManageGuild }
+                }) }
+            },
+            author: { id: "52345678901234567" },
+            reply: async payload => { reply = payload; }
+        };
+
+        assert.equal(await route({ message, commandText: "kebijakan moderasi spam" }), true);
+        assert.match(reply.content, /alert-only/i);
+        assert.equal(reply.components[0].components[0].data.custom_id, "castorice:security_spam_policy");
+        assert.deepEqual(reply.allowedMentions, { parse: [] });
     });
     const message = {
         guild: {

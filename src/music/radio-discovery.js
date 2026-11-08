@@ -1,62 +1,16 @@
-const net = require("node:net");
+const { parseExternalHttpUrl } = require("./url-security");
+const { createSecureFetch } = require("./secure-http");
 
 const RADIO_BROWSER_BASE_URL = "https://de1.api.radio-browser.info";
 const MAX_RESULTS = 8;
 const MAX_QUERY_LENGTH = 100;
 const REQUEST_TIMEOUT_MS = 8000;
 
-function isPrivateIp(host) {
-    const version = net.isIP(host);
-    if (version === 4) {
-        const [a, b] = host.split(".").map(Number);
-        return a === 0 ||
-            a === 10 ||
-            a === 127 ||
-            a >= 224 ||
-            (a === 100 && b >= 64 && b <= 127) ||
-            (a === 169 && b === 254) ||
-            (a === 172 && b >= 16 && b <= 31) ||
-            (a === 192 && (b === 0 || b === 168)) ||
-            (a === 198 && (b === 18 || b === 19)) ||
-            (a === 203 && b === 0);
-    }
-
-    if (version === 6) {
-        const normalized = host.toLowerCase();
-        if (normalized.startsWith("::ffff:")) {
-            const mapped = normalized.slice(7);
-            return net.isIP(mapped) === 4 ? isPrivateIp(mapped) : true;
-        }
-        return normalized === "::" ||
-            normalized === "::1" ||
-            normalized.startsWith("fc") ||
-            normalized.startsWith("fd") ||
-            /^fe[89ab]/i.test(normalized) ||
-            normalized.startsWith("ff") ||
-            normalized.startsWith("2001:db8:");
-    }
-
-    return false;
-}
-
 function normalizeStreamUrl(value) {
     if (typeof value !== "string" || !value.trim()) return null;
 
     try {
-        const url = new URL(value.trim());
-        const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-        if (
-            !["http:", "https:"].includes(url.protocol) ||
-            url.username ||
-            url.password ||
-            !host ||
-            host === "localhost" ||
-            host.endsWith(".localhost") ||
-            host.endsWith(".local") ||
-            host.endsWith(".internal") ||
-            isPrivateIp(host)
-        ) return null;
-
+        const url = parseExternalHttpUrl(value.trim());
         return url.toString();
     } catch {
         return null;
@@ -101,7 +55,7 @@ function mapStations(payload) {
 }
 
 function createRadioDiscovery({
-    fetchImpl = globalThis.fetch,
+    fetchImpl = createSecureFetch(),
     baseUrl = RADIO_BROWSER_BASE_URL,
     timeoutMs = REQUEST_TIMEOUT_MS
 } = {}) {
@@ -112,8 +66,8 @@ function createRadioDiscovery({
         throw new RangeError("Radio Discovery timeout must be between 1 and 60000 ms.");
     }
 
-    const root = new URL(baseUrl);
-    if (root.protocol !== "https:" || root.username || root.password) {
+    const root = parseExternalHttpUrl(baseUrl);
+    if (root.protocol !== "https:") {
         throw new TypeError("Radio Browser API must use a trusted HTTPS endpoint.");
     }
 

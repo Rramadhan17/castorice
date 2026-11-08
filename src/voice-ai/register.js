@@ -15,12 +15,18 @@ function registerVoiceManager(client, options = {}) {
         logger: options.logger,
         timers: options.timers
     });
-    const handleInteraction = registerVoiceManagerInteractions(client, {
-        service,
-        stateStore: store,
-        featureGuard: options.featureGuard,
-        logger: options.logger
-    });
+    let handleInteraction;
+    try {
+        handleInteraction = registerVoiceManagerInteractions(client, {
+            service,
+            stateStore: store,
+            featureGuard: options.featureGuard,
+            logger: options.logger
+        });
+    } catch (error) {
+        events.dispose();
+        throw error;
+    }
 
     return {
         service,

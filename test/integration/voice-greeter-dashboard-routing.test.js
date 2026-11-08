@@ -12,20 +12,23 @@ function makeGuildId() {
     return `${Date.now()}${String(Math.floor(Math.random() * 10_000)).padStart(4, "0")}`;
 }
 
-function makeInteraction({ guildId, permitted, customId, modal = false }) {
+function makeInteraction({ guildId, permitted, customId, modal = false, select = false, values = [] }) {
     const calls = {};
     return {
         calls,
         customId,
         guildId,
+        values,
+        message: { content: "Greeting text remains unchanged." },
         guild: { id: guildId },
         user: { id: "12345678901234567" },
         memberPermissions: { has: () => permitted },
         isChatInputCommand: () => false,
         isModalSubmit: () => modal,
-        isButton: () => !modal,
-        isStringSelectMenu: () => false,
+        isButton: () => !modal && !select,
+        isStringSelectMenu: () => select,
         reply: async payload => { calls.reply = payload; },
+        update: async payload => { calls.updated = payload; },
         showModal: async payload => { calls.modal = payload.toJSON(); },
         deferReply: async () => { calls.deferred = true; },
         editReply: async payload => { calls.edited = payload; },
@@ -57,6 +60,25 @@ test("Voice Greeter Dashboard requires Manage Server and persists submitted conf
     assert.equal(submit.calls.deferred, true);
     assert.match(submit.calls.edited.content, /berhasil disimpan/i);
     assert.equal(await voiceGreeter.getGreeting(guildId), "Welcome {user} to this server!");
+});
+
+test("Voice Greeter Help Center navigates in the same message without admin permissions", async () => {
+    const client = new EventEmitter();
+    registerInteractionHandler(client);
+    const onInteraction = client.listeners(Events.InteractionCreate)[0];
+    const interaction = makeInteraction({
+        guildId: makeGuildId(),
+        permitted: false,
+        customId: "castorice:voice_help_select",
+        select: true,
+        values: ["music"]
+    });
+
+    await onInteraction(interaction);
+
+    assert.equal(interaction.calls.updated.content, interaction.message.content);
+    assert.equal(interaction.calls.updated.embeds[0].data.title, "Help Center Castorice — Music dan Radio");
+    assert.equal(interaction.calls.reply, undefined);
 });
 
 test("Voice Greeter settings modal rejects both open and submit while the feature is disabled", async t => {

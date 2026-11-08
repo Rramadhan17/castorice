@@ -14,6 +14,12 @@ const DEFAULT_OFFLINE_POLICY = Object.freeze({
     maxObservationGapMinutes: 5,
     excludedBotIds: []
 });
+const DEFAULT_SPAM_POLICY = Object.freeze({
+    enabled: false,
+    deleteThreshold: 5,
+    timeoutThreshold: 8,
+    timeoutSeconds: 60
+});
 
 const RISK_PERMISSIONS = [
     { key: "Administrator", flag: PermissionFlagsBits.Administrator, severity: "critical" },
@@ -220,6 +226,30 @@ function validateOfflinePolicy(input) {
     };
 }
 
+function validateSpamPolicy(input) {
+    if (!input || typeof input !== "object" || typeof input.enabled !== "boolean") {
+        throw new Error("Status moderasi spam harus berupa ON atau OFF.");
+    }
+    if (!Number.isInteger(input.deleteThreshold) ||
+        input.deleteThreshold < 3 || input.deleteThreshold > 20) {
+        throw new Error("Threshold hapus harus antara 3 sampai 20 pesan.");
+    }
+    if (!Number.isInteger(input.timeoutThreshold) ||
+        input.timeoutThreshold <= input.deleteThreshold || input.timeoutThreshold > 30) {
+        throw new Error("Threshold timeout harus di atas threshold hapus dan maksimal 30 pesan.");
+    }
+    if (!Number.isInteger(input.timeoutSeconds) ||
+        input.timeoutSeconds < 60 || input.timeoutSeconds > 28 * 24 * 60 * 60) {
+        throw new Error("Durasi timeout harus antara 60 detik sampai 28 hari.");
+    }
+    return {
+        enabled: input.enabled,
+        deleteThreshold: input.deleteThreshold,
+        timeoutThreshold: input.timeoutThreshold,
+        timeoutSeconds: input.timeoutSeconds
+    };
+}
+
 function validateAuditLog(value) {
     return Boolean(
         value &&
@@ -263,6 +293,14 @@ function createSecurityAssistant({ store = new JsonGuildStore(), now, id } = {})
         return event;
     }
 
+    async function recordMonitorEvent(guildId, type, detail) {
+        if (typeof type !== "string" || !/^spam_[a-z_]{1,60}$/.test(type) ||
+            typeof detail !== "string" || detail.length > 512) {
+            throw new TypeError("Security monitor audit event is invalid.");
+        }
+        return appendAuditEvent(guildId, type, detail);
+    }
+
     async function getPolicy(guildId) {
         return store.read(guildId, "security_offline_policy", {
             schemaVersion: POLICY_SCHEMA_VERSION,
@@ -276,6 +314,45 @@ function createSecurityAssistant({ store = new JsonGuildStore(), now, id } = {})
                 }
             }
         });
+    }
+
+    async function getSpamPolicy(guildId) {
+        return store.read(guildId, "security_spam_policy", {
+            schemaVersion: POLICY_SCHEMA_VERSION,
+            defaultValue: structuredClone(DEFAULT_SPAM_POLICY),
+            validate: value => {
+                try {
+                    validateSpamPolicy(value);
+                    return true;
+                } catch {
+                    return false;
+                }
+            }
+        });
+    }
+
+    async function setSpamPolicy(guild, actor, input) {
+        assertManageGuild(guild, actor);
+        const policy = validateSpamPolicy(input);
+        await appendAuditEvent(
+            guild.id,
+            "spam_policy_change_authorized",
+            `Administrator approved spam moderation policy; enabled=${policy.enabled}; deleteThreshold=${policy.deleteThreshold}; timeoutThreshold=${policy.timeoutThreshold}; timeoutSeconds=${policy.timeoutSeconds}.`,
+            actor.id
+        );
+        await store.update(guild.id, "security_spam_policy", () => policy, {
+            schemaVersion: POLICY_SCHEMA_VERSION,
+            defaultValue: structuredClone(DEFAULT_SPAM_POLICY),
+            validate: value => {
+                try {
+                    validateSpamPolicy(value);
+                    return true;
+                } catch {
+                    return false;
+                }
+            }
+        });
+        return policy;
     }
 
     async function setPolicy(guild, actor, input) {
@@ -440,7 +517,16 @@ function createSecurityAssistant({ store = new JsonGuildStore(), now, id } = {})
         return log.events.slice(0, Math.max(1, Math.min(Number(limit) || 50, MAX_AUDIT_EVENTS)));
     }
 
-    return { audit, listReports, getPolicy, setPolicy, listAuditLog };
+    return {
+        audit,
+        listReports,
+        getPolicy,
+        setPolicy,
+        getSpamPolicy,
+        setSpamPolicy,
+        listAuditLog,
+        recordMonitorEvent
+    };
 }
 
 module.exports = {
@@ -449,11 +535,13 @@ module.exports = {
     MAX_FINDINGS,
     MAX_AUDIT_EVENTS,
     DEFAULT_OFFLINE_POLICY,
+    DEFAULT_SPAM_POLICY,
     RISK_PERMISSIONS,
     createSecurityAssistant,
     scanGuild,
     validateReportCollection,
     validateOfflinePolicy,
+    validateSpamPolicy,
     validateAuditLog,
     assertManageGuild,
     summarizeBotPresence

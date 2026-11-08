@@ -7,11 +7,16 @@ const {
     ButtonStyle,
     ModalBuilder,
     TextInputBuilder,
-    TextInputStyle
+    TextInputStyle,
+    StringSelectMenuBuilder,
+    ChannelType
 } = require("discord.js");
 
 const { checkFeature } = require("../core/feature-guard");
 const { buildDashboard } = require("../dashboard/menu-panel");
+
+const pendingChannelCreations = new Map();
+const CHANNEL_CREATION_TTL_MS = 3 * 60 * 1000;
 
 function buildVoicePanel(record = null) {
     const embed = new EmbedBuilder()
@@ -38,6 +43,7 @@ function buildVoicePanel(record = null) {
     }
 
     rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("voice:create_channel").setLabel("Create Voice Channel").setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId("voice:dashboard").setLabel("Dashboard").setStyle(ButtonStyle.Secondary)
     ));
 
@@ -57,6 +63,50 @@ function buildTextModal({ id, title, label, placeholder, maxLength, style = Text
         .setCustomId(`voice:${id}_submit`)
         .setTitle(title)
         .addComponents(new ActionRowBuilder().addComponents(input));
+}
+
+function buildCreateChannelModal(userId, categoryId = null) {
+    return new ModalBuilder()
+        .setCustomId(`voice:create_channel_submit:${userId}:${categoryId || "none"}`)
+        .setTitle("Create Voice Channel")
+        .addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder()
+                .setCustomId("name")
+                .setLabel("Channel name")
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true)
+                .setMaxLength(100)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder()
+                .setCustomId("privacy")
+                .setLabel("Privacy: public or private")
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder("public")
+                .setRequired(true)
+                .setMaxLength(7)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder()
+                .setCustomId("limit")
+                .setLabel("Member limit: 0-99")
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder("0")
+                .setRequired(true)
+                .setMaxLength(2))
+        );
+}
+
+function buildChannelPreview(options, userId, requestId) {
+    const confirm = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`voice:create_channel_confirm:${userId}:${requestId}`)
+            .setLabel("Create Channel")
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("voice:cancel").setLabel("Cancel").setStyle(ButtonStyle.Secondary)
+    );
+    return {
+        content: `Review voice channel:\nName: **${options.name}**\nCategory: ${options.categoryId ? `<#${options.categoryId}>` : "None"}\nPrivacy: **${options.privacy}**\nMember limit: **${options.userLimit || "Unlimited"}**`,
+        components: [confirm],
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] }
+    };
 }
 
 function createVoiceInteractions({
@@ -140,10 +190,138 @@ function createVoiceInteractions({
                 return true;
             }
 
+            if (action === "create_channel") {
+                const categories = interaction.guild.channels?.cache
+                    ?.filter(channel => channel.type === ChannelType.GuildCategory);
+                if (!categories?.size) {
+                    await interaction.showModal(buildCreateChannelModal(interaction.user.id));
+                    return true;
+                }
+                const options = [{ label: "No category", value: "none", description: "Create at the server root" }];
+                for (const category of categories.values()) {
+                    if (options.length >= 25) break;
+                    options.push({
+                        label: category.name.slice(0, 100),
+                        value: category.id,
+                        description: `Category ${category.id}`
+                    });
+                }
+                const menu = new StringSelectMenuBuilder()
+                    .setCustomId(`voice:create_channel_category:${interaction.user.id}`)
+                    .setPlaceholder("Choose a category")
+                    .addOptions(options);
+                await interaction.update({
+                    content: "Choose where the new voice channel should be created.",
+                    embeds: [],
+                    components: [new ActionRowBuilder().addComponents(menu)]
+                });
+                return true;
+            }
+
+            if (action === "create_channel_category" && interaction.isStringSelectMenu()) {
+                const expectedUserId = customId.split(":")[2];
+                if (expectedUserId !== interaction.user.id) {
+                    await interaction.reply({ content: "Hanya pembuat permintaan yang dapat memilih kategori.", flags: MessageFlags.Ephemeral });
+                    return true;
+                }
+                const selectedCategoryId = interaction.values[0];
+                let categoryId = null;
+                if (selectedCategoryId !== "none") {
+                    const category = await interaction.guild.channels.fetch(selectedCategoryId).catch(() => null);
+                    if (!category || category.type !== ChannelType.GuildCategory ||
+                        String(category.guildId ?? category.guild?.id) !== String(interaction.guildId)) {
+                        throw new Error("Kategori tidak ditemukan di server ini.");
+                    }
+                    categoryId = category.id;
+                }
+                await interaction.showModal(buildCreateChannelModal(interaction.user.id, categoryId));
+                return true;
+            }
+
             const member = await interaction.guild.members.fetch(interaction.user.id);
             if (action === "create") {
                 await service.createTemporaryVoice(interaction.guild, interaction.guildId, member);
                 await updatePanel(interaction, "Temporary voice berhasil dibuat dan kamu dipindahkan ke sana.");
+                return true;
+            }
+
+            if (action === "create_channel_submit" && interaction.isModalSubmit()) {
+                const [, , expectedUserId, selectedCategoryId] = customId.split(":");
+                if (expectedUserId !== interaction.user.id) {
+                    await interaction.reply({ content: "Hanya pembuat permintaan yang dapat mengatur channel.", flags: MessageFlags.Ephemeral });
+                    return true;
+                }
+                const name = interaction.fields.getTextInputValue("name").trim().replace(/\s+/g, " ");
+                const privacy = interaction.fields.getTextInputValue("privacy").trim().toLowerCase();
+                const limitText = interaction.fields.getTextInputValue("limit").trim();
+                if (!name || name.length > 100) throw new Error("Nama channel harus berisi 1 sampai 100 karakter.");
+                if (!["public", "private"].includes(privacy)) throw new Error("Privacy harus public atau private.");
+                if (!/^\d{1,2}$/.test(limitText) || Number(limitText) > 99) {
+                    throw new Error("Member limit harus berupa angka dari 0 sampai 99.");
+                }
+                const categoryId = selectedCategoryId === "none" ? null : selectedCategoryId;
+                if (categoryId) {
+                    const category = await interaction.guild.channels.fetch(categoryId).catch(() => null);
+                    if (!category || category.type !== ChannelType.GuildCategory ||
+                        String(category.guildId ?? category.guild?.id) !== String(interaction.guildId)) {
+                        throw new Error("Kategori tidak ditemukan di server ini.");
+                    }
+                }
+
+                const requestId = interaction.id;
+                pendingChannelCreations.set(requestId, {
+                    guildId: String(interaction.guildId),
+                    userId: String(interaction.user.id),
+                    expiresAt: Date.now() + CHANNEL_CREATION_TTL_MS,
+                    options: { name, categoryId: categoryId || null, privacy, userLimit: Number(limitText) }
+                });
+                for (const [id, request] of pendingChannelCreations) {
+                    if (request.expiresAt <= Date.now()) pendingChannelCreations.delete(id);
+                }
+                if (pendingChannelCreations.size > 500) {
+                    const oldest = pendingChannelCreations.keys().next().value;
+                    if (oldest) pendingChannelCreations.delete(oldest);
+                }
+                await interaction.reply(buildChannelPreview(
+                    { name, categoryId, privacy, userLimit: Number(limitText) },
+                    interaction.user.id,
+                    requestId
+                ));
+                return true;
+            }
+
+            if (action === "create_channel_confirm") {
+                const [, , expectedUserId, requestId] = customId.split(":");
+                if (expectedUserId !== interaction.user.id) {
+                    await interaction.reply({ content: "Hanya pembuat permintaan yang dapat mengonfirmasi.", flags: MessageFlags.Ephemeral });
+                    return true;
+                }
+                const pending = pendingChannelCreations.get(requestId);
+                if (!pending || pending.expiresAt <= Date.now() ||
+                    pending.guildId !== String(interaction.guildId) ||
+                    pending.userId !== String(interaction.user.id)) {
+                    pendingChannelCreations.delete(requestId);
+                    await interaction.reply({ content: "Permintaan sudah kedaluwarsa. Buka kembali Voice Manager untuk mencoba lagi.", flags: MessageFlags.Ephemeral });
+                    return true;
+                }
+                pendingChannelCreations.delete(requestId);
+                const channel = await service.createVoiceChannel(
+                    interaction.guild,
+                    interaction.guildId,
+                    member,
+                    { ...pending.options, requestKey: requestId }
+                );
+                await interaction.update({
+                    content: `Voice channel <#${channel.id}> berhasil dibuat.`,
+                    embeds: [],
+                    components: [],
+                    allowedMentions: { parse: [] }
+                });
+                return true;
+            }
+
+            if (action === "cancel") {
+                await interaction.update({ content: "Pembuatan channel dibatalkan.", embeds: [], components: [] });
                 return true;
             }
 

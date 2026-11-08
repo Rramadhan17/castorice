@@ -43,10 +43,13 @@ test("extractTrigger detects natural name triggers", () => {
     const cases = [
         { text: "Castorice: play Die With A Smile", expectedClean: "play Die With A Smile" },
         { text: "Castorice, buat voice AI", expectedClean: "buat voice AI" },
+        { text: "Castorice! buat voice AI", expectedClean: "buat voice AI" },
+        { text: "Castorice... aktifkan Kick Voice", expectedClean: "aktifkan Kick Voice" },
         { text: "castorice bantu terjemahkan kalimat ini", expectedClean: "bantu terjemahkan kalimat ini" },
         { text: "Hey Castorice: status musik", expectedClean: "status musik" },
         { text: "Hai castorice, pause", expectedClean: "pause" },
-        { text: "Castorice", expectedClean: "" }
+        { text: "Castorice", expectedClean: "" },
+        { text: "Castorice!", expectedClean: "" }
     ];
 
     for (const { text, expectedClean } of cases) {

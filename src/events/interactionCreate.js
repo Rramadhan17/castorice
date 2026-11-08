@@ -25,7 +25,9 @@ const {
     buildSearchResultsPanel,
     buildFeaturePanel,
     buildSettingsPanel,
+    SETTINGS_ACTION_IDS,
     buildFeatureSelectionPanel,
+    buildGlobalAISettingsPanel,
     buildVoiceGreeterModal,
     buildServerTemplatesPanel,
     buildServerTemplateCreateModal,
@@ -35,7 +37,9 @@ const {
     buildSecurityReportPanel,
     buildSecurityHistoryPanel,
     buildSecurityPolicyModal,
-    buildSecurityPolicyPreviewPanel
+    buildSecurityPolicyPreviewPanel,
+    buildSecuritySpamPolicyModal,
+    buildSecuritySpamPolicyPreviewPanel
 } = require("../dashboard/menu-panel");
 
 const {
@@ -54,7 +58,7 @@ const {
 } = require("../server-templates/executor");
 const { createSecurityAssistant } = require("../security/assistant");
 const { createSecurityTagRouter } = require("../security/tag-router");
-const { validateOfflinePolicy } = require("../security/assistant");
+const { validateOfflinePolicy, validateSpamPolicy } = require("../security/assistant");
 
 const music = require("../music/manager");
 const { createRadioDiscovery } = require("../music/radio-discovery");
@@ -107,7 +111,12 @@ const translatorActions = new Set([
 const { parseMusicIntent } = require("../ai/music-intent");
 const { extractTrigger } = require("../ai/natural-trigger");
 const { resolveIntent } = require("../ai/intent-router");
-const { createAIProviderFromEnv } = require("../ai/openai-compatible-provider");
+const { createGeminiProviderFromEnv } = require("../ai/provider-manager");
+const { globalAISettings: defaultGlobalAISettings } = require("../ai/global-settings");
+const {
+    formatAIProviderStatus,
+    parseAIProviderSettingsIntent
+} = require("../ai/provider-settings");
 const { AIConversationError, createAIConversationService } = require("../ai/conversation-service");
 const { loadTtsProvider } = require("../voice-ai/greeter-tts");
 const { createVoiceAIService } = require("../voice-ai/interaction-service");
@@ -116,8 +125,11 @@ const { createVoiceGreeterTagRouter } = require("../voice-ai/greeter-tag-router"
 const musicPanelUpdater = require("../music/panel-updater");
 const { searchLyrics } = require("../lyrics/engine");
 const { buildLyricsPanel } = require("../lyrics/panel");
+const { buildVoiceGreeterHelpCenter } = require("../dashboard/voice-greeter-help-center");
 const { translateLyrics } = require("../lyrics/translation");
 const { createVoiceTagRouter } = require("../voice-ai/tag-router");
+const { createVoiceCenterTagRouter } = require("../voice-ai/center-tag-router");
+const { createVoiceCenterInteractionHandler } = require("../voice-ai/center-interactions");
 const { createPlaylistService } = require("../playlists/service");
 const { enqueuePlaylist } = require("../playlists/queue");
 const { createPlaylistTagRouter } = require("../playlists/tag-router");
@@ -154,6 +166,117 @@ function translationLabel(result) {
     return `Terjemahan (${source} → ${result.target}):`;
 }
 
+function parseSettingsRequest(text) {
+    const requests = [
+        {
+            action: "tutor",
+            pattern: /\b(?:tutor|tutorial|panduan(?:\s+fitur|\s+penggunaan)?|cara\s+menggunakan(?:\s+castorice)?)\b/i
+        },
+        {
+            action: "rate",
+            pattern: /\b(?:rate\s+(?:the\s+)?bot|rating(?:\s+(?:bot|castorice))?|beri(?:kan)?\s+nilai(?:\s+(?:bot|castorice))?|nilai\s+(?:bot|castorice))\b/i
+        },
+        {
+            action: "suggestion",
+            pattern: /\b(?:suggestion|feedback|saran\s+(?:fitur|untuk\s+bot)|kirim\s+saran|beri(?:kan)?\s+saran|ajukan\s+saran)\b/i
+        },
+        {
+            action: "report",
+            pattern: /\b(?:report|lapor(?:kan)?)\s+(?:a\s+)?(?:bug|masalah|kesalahan)\b|\bbug\s+report\b/i
+        }
+    ];
+    return requests.find(request => request.pattern.test(String(text || "")))?.action || null;
+}
+
+function unavailableSettingsMessage(action) {
+    const messages = {
+        rate: "Fitur Rate Bot belum tersedia. Belum ada sistem rating aktif, dan tidak ada rating yang disimpan.",
+        suggestion: "Pengiriman Suggestion belum tersedia. Belum ada layanan penyimpanan saran yang dikonfigurasi, jadi belum ada saran yang dikirim.",
+        report: "Report Bug belum tersedia. Belum ada layanan pelaporan yang dikonfigurasi, jadi belum ada laporan yang disimpan."
+    };
+    return messages[action] || "Aksi Settings ini belum tersedia.";
+}
+
+function aiFailureMessage(error) {
+    const messages = {
+        not_configured: "Gemini belum dikonfigurasi. Pemilik bot perlu menetapkan GEMINI_API_KEY; GEMINI_MODEL opsional.",
+        configuration_error: "Konfigurasi Gemini tidak valid. Pemilik bot perlu memeriksa GEMINI_API_KEY, GEMINI_MODEL, dan AI_TIMEOUT_MS.",
+        request_error: "Gemini menolak format request atau konfigurasi model. Periksa GEMINI_MODEL lalu coba lagi.",
+        authentication_failed: "Gemini menolak autentikasi atau akses. Pemilik bot perlu memeriksa konfigurasi Gemini.",
+        invalid_api_key: "Kredensial Gemini tidak valid. Pemilik bot perlu memeriksa konfigurasi Gemini.",
+        quota_exceeded: "Kuota Gemini telah habis. Periksa kuota atau billing Gemini.",
+        rate_limited: "Gemini sedang membatasi permintaan. Coba lagi nanti.",
+        timeout: "Gemini tidak merespons tepat waktu. Coba lagi nanti.",
+        model_discovery_failed: "Daftar model Gemini gagal dimuat. Periksa akses Gemini atau tentukan GEMINI_MODEL.",
+        model_unavailable: "Tidak ditemukan model Gemini yang mendukung pembuatan jawaban.",
+        model_not_compatible: "Model Gemini yang dikonfigurasi tidak tersedia atau tidak kompatibel.",
+        invalid_model: "Model Gemini yang dikonfigurasi tidak tersedia.",
+        invalid_response: "Gemini mengembalikan respons yang tidak dapat digunakan.",
+        provider_error: "Gemini gagal memproses permintaan. Tidak ada jawaban yang dibuat.",
+        provider_unavailable: "Gemini sedang tidak tersedia. Coba lagi nanti.",
+        unavailable: "Gemini tidak dapat dijangkau. Coba lagi nanti.",
+        cancelled: "Permintaan AI dibatalkan.",
+        rate_limited_chat: "Tunggu sebentar sebelum mengirim pesan AI berikutnya.",
+        busy: "Castorice masih memproses pesanmu. Coba lagi sebentar.",
+        input_too_long: error.message,
+        empty_input: error.message
+    };
+    if (error?.code === "rate_limited" && error instanceof AIConversationError) {
+        return messages.rate_limited_chat;
+    }
+    return messages[error?.code] || "AI gagal merespons. Coba lagi nanti.";
+}
+
+function safeAIErrorCode(error) {
+    const safeCodes = new Set([
+        "not_configured",
+        "configuration_error",
+        "request_error",
+        "authentication_failed",
+        "invalid_api_key",
+        "quota_exceeded",
+        "rate_limited",
+        "timeout",
+        "model_discovery_failed",
+        "model_unavailable",
+        "model_not_compatible",
+        "invalid_model",
+        "invalid_response",
+        "provider_error",
+        "provider_unavailable",
+        "unavailable",
+        "cancelled",
+        "busy",
+        "input_too_long",
+        "empty_input"
+    ]);
+    return safeCodes.has(error?.code) ? error.code : "provider_error";
+}
+
+async function replyToAIMessage(message, payload, logger) {
+    try {
+        return await message.reply(payload);
+    } catch {
+        logger.error?.("[AI Chat Discord Reply Error]", "reply_failed");
+        return null;
+    }
+}
+
+async function replyToOwnerPrivately(message, content, logger) {
+    try {
+        if (typeof message.author?.send !== "function") throw new Error("dm_unavailable");
+        await message.author.send({ content, allowedMentions: { parse: [] } });
+        return true;
+    } catch {
+        logger.warn?.("[AI Provider Settings DM Error]", "dm_unavailable");
+        await message.reply({
+            content: "Pengaturan provider AI hanya ditampilkan lewat DM. Aktifkan DM dari anggota server lalu coba lagi.",
+            allowedMentions: { parse: [] }
+        });
+        return false;
+    }
+}
+
 module.exports = function registerInteractionHandler(client, dependencies = {}) {
     const translatorFactory = dependencies.translatorFactory || createTranslatorFromEnv;
     const lyricsSearch = dependencies.lyricsSearch || searchLyrics;
@@ -172,12 +295,80 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
     const pendingTemplateDeletions = new Map();
     const activeTemplateApplyGuilds = new Set();
     const pendingSecurityPolicies = new Map();
+    const pendingSecuritySpamPolicies = new Map();
     const radioSearchResults = new Map();
     const securityAssistant = dependencies.securityAssistant || createSecurityAssistant();
+    const logger = dependencies.logger || console;
+    const ownerCheck = dependencies.isOwner || isOwner;
+    const globalAISettings = dependencies.globalAISettings || defaultGlobalAISettings;
+    let aiProvider = dependencies.aiProvider || null;
+    let aiProviderConfigurationError = null;
+    if (!aiProvider && !dependencies.aiConversationService) {
+        try {
+            aiProvider = createGeminiProviderFromEnv(
+                dependencies.environment || process.env,
+                { fetchImpl: dependencies.fetchImpl }
+            );
+        } catch {
+            aiProviderConfigurationError = true;
+            logger.error?.("[Gemini AI Configuration Error]", "invalid_configuration");
+        }
+    }
     const aiConversationService = dependencies.aiConversationService ||
         createAIConversationService({
-            provider: dependencies.aiProvider || createAIProviderFromEnv()
+            provider: aiProvider
         });
+    async function applyGlobalAISettings() {
+        return globalAISettings.getSettings();
+    }
+    function getProviderStatus() {
+        return {
+            configured: Boolean(aiProvider),
+            configurationError: aiProviderConfigurationError
+        };
+    }
+    async function buildSettingsCenter(guildId, canManageGuild, userId) {
+        const globalSettings = await applyGlobalAISettings();
+        const serverAI = /^\d{17,20}$/.test(String(guildId || ""))
+            ? await getFeatureState(guildId, "ai_chat")
+            : null;
+        return buildSettingsPanel({
+            guildId,
+            canManageGuild,
+            globalAIEnabled: globalSettings.enabled,
+            serverAIEnabled: serverAI?.enabled ?? null,
+            providerStatus: getProviderStatus(),
+            isOwner: ownerCheck(userId)
+        });
+    }
+    async function buildGlobalSettingsCenter() {
+        const settings = await applyGlobalAISettings();
+        return buildGlobalAISettingsPanel({
+            settings,
+            providerStatus: getProviderStatus()
+        });
+    }
+    const featureGuard = dependencies.featureGuard || checkFeature;
+    async function checkAIFeature(guildId, featureId) {
+        if (featureId === "ai_chat" || featureId === "voice_ai") {
+            let settings;
+            try {
+                settings = await applyGlobalAISettings();
+            } catch {
+                return {
+                    allowed: false,
+                    reason: "Status AI global gagal dibaca. Fitur AI dinonaktifkan sementara; hubungi pemilik bot."
+                };
+            }
+            if (!settings.enabled) {
+                return {
+                    allowed: false,
+                    reason: "Layanan AI sedang dinonaktifkan secara global oleh pemilik bot."
+                };
+            }
+        }
+        return featureGuard(guildId, featureId);
+    }
     const voiceAIService = dependencies.voiceAIService || createVoiceAIService({
         conversationService: aiConversationService,
         ttsProvider: dependencies.ttsProvider,
@@ -186,7 +377,7 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
     });
     const voiceAITagRouter = createVoiceAITagRouter({
         service: voiceAIService,
-        featureGuard: dependencies.featureGuard || checkFeature
+        featureGuard: checkAIFeature
     });
     const securityTagRouter = createSecurityTagRouter({
         service: securityAssistant,
@@ -206,13 +397,27 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
             stateStore: dependencies.voiceStateStore
         })
         : null;
+    const voiceCenterTagRouter = dependencies.voiceCenterService
+        ? createVoiceCenterTagRouter({
+            service: dependencies.voiceCenterService,
+            logger
+        })
+        : null;
+    const voiceCenterInteractionHandler = dependencies.voiceCenterService
+        ? createVoiceCenterInteractionHandler({
+            service: dependencies.voiceCenterService,
+            ownerId: dependencies.ownerId || null,
+            logger
+        })
+        : null;
     const voiceGreeterTagRouter = dependencies.voiceGreeterTagRouter ||
         createVoiceGreeterTagRouter({
             featureGuard: dependencies.featureGuard || checkFeature
         });
 
-    client.on(Events.InteractionCreate, async interaction => {
+    const handleInteractionCreate = async interaction => {
         try {
+            if (voiceCenterInteractionHandler && await voiceCenterInteractionHandler(interaction)) return;
             if (interaction.isChatInputCommand()) {
                 const command = interaction.commandName;
 
@@ -436,6 +641,53 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
                     return;
                 }
 
+                if (interaction.customId === "castorice:security_spam_policy_submit") {
+                    const feature = await checkFeature(interaction.guildId, "security_assistant");
+                    if (!feature.allowed) {
+                        await interaction.reply({ content: feature.reason, flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    if (!interaction.guild || !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+                        await interaction.reply({ content: "Kamu membutuhkan izin Manage Server untuk mengubah kebijakan moderasi spam.", flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    try {
+                        const enabledValue = interaction.fields.getTextInputValue("security_spam_enabled").trim().toUpperCase();
+                        if (!["ON", "OFF"].includes(enabledValue)) {
+                            throw new Error("Status moderasi harus berupa ON atau OFF.");
+                        }
+                        const policy = validateSpamPolicy({
+                            enabled: enabledValue === "ON",
+                            deleteThreshold: Number(interaction.fields.getTextInputValue("security_spam_delete_threshold")),
+                            timeoutThreshold: Number(interaction.fields.getTextInputValue("security_spam_timeout_threshold")),
+                            timeoutSeconds: Number(interaction.fields.getTextInputValue("security_spam_timeout_seconds"))
+                        });
+                        for (const [id, pending] of pendingSecuritySpamPolicies) {
+                            if (pending.expiresAt <= Date.now()) pendingSecuritySpamPolicies.delete(id);
+                        }
+                        if (pendingSecuritySpamPolicies.size >= 100) {
+                            pendingSecuritySpamPolicies.delete(pendingSecuritySpamPolicies.keys().next().value);
+                        }
+                        const confirmationId = randomUUID();
+                        pendingSecuritySpamPolicies.set(confirmationId, {
+                            guildId: interaction.guild.id,
+                            requesterId: interaction.user.id,
+                            policy,
+                            expiresAt: Date.now() + 5 * 60 * 1000
+                        });
+                        await interaction.reply({
+                            ...buildSecuritySpamPolicyPreviewPanel(policy, confirmationId, interaction.user.id),
+                            flags: MessageFlags.Ephemeral
+                        });
+                    } catch (error) {
+                        await interaction.reply({
+                            content: error.message || "Kebijakan moderasi spam tidak valid.",
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+                    return;
+                }
+
                 if (interaction.customId === "castorice:playlist_create_submit") {
                     const feature = await checkFeature(interaction.guildId, "playlists");
                     if (!feature.allowed) {
@@ -652,6 +904,26 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
             }
 
             if (interaction.isStringSelectMenu()) {
+                if (interaction.customId === "castorice:voice_help_select") {
+                    try {
+                        const panel = buildVoiceGreeterHelpCenter(interaction.values?.[0]);
+                        await interaction.update({
+                            content: interaction.message.content,
+                            ...panel
+                        });
+                    } catch (error) {
+                        if (error instanceof RangeError) {
+                            await interaction.reply({
+                                content: "Topik Help Center tidak valid. Pilih topik dari menu.",
+                                flags: MessageFlags.Ephemeral
+                            });
+                            return;
+                        }
+                        throw error;
+                    }
+                    return;
+                }
+
                 if (interaction.customId === "castorice:translator_language_select") {
                     const feature = await checkFeature(interaction.guildId, "translator");
                     if (!feature.allowed) {
@@ -932,6 +1204,85 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
                 const parts = interaction.customId.split(":");
                 const action = parts[1];
 
+                if (action === "ai_global_open" || action === "ai_global_toggle") {
+                    if (!ownerCheck(interaction.user?.id)) {
+                        await interaction.reply({
+                            content: "Akses ditolak. Kontrol AI global hanya tersedia untuk pemilik bot.",
+                            flags: MessageFlags.Ephemeral
+                        });
+                        return;
+                    }
+                    if (action === "ai_global_open") {
+                        await interaction.update(await buildGlobalSettingsCenter());
+                        return;
+                    }
+                    const current = await applyGlobalAISettings();
+                    await globalAISettings.setEnabled(!current.enabled);
+                    await interaction.update(await buildGlobalSettingsCenter());
+                    return;
+                }
+
+                if (action === "ai_server_toggle") {
+                    if (!interaction.guild || !interaction.guildId ||
+                        interaction.guild.id !== interaction.guildId) {
+                        await interaction.reply({
+                            content: "Pengaturan AI server hanya dapat digunakan di server Discord yang sesuai.",
+                            flags: MessageFlags.Ephemeral
+                        });
+                        return;
+                    }
+                    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+                        await interaction.reply({
+                            content: "Kamu membutuhkan izin Manage Server untuk mengubah AI Chat server.",
+                            flags: MessageFlags.Ephemeral
+                        });
+                        return;
+                    }
+                    const settings = await applyGlobalAISettings();
+                    const currentState = await getFeatureState(interaction.guildId, "ai_chat");
+                    if (!currentState.enabled && !settings.enabled) {
+                        await interaction.reply({
+                            content: "AI global sedang nonaktif. Pemilik bot harus mengaktifkannya sebelum admin server dapat mengaktifkan AI Chat.",
+                            flags: MessageFlags.Ephemeral
+                        });
+                        return;
+                    }
+                    await setFeatureEnabled(
+                        interaction.guildId,
+                        "ai_chat",
+                        !currentState.enabled
+                    );
+                    await interaction.update(await buildSettingsCenter(
+                        interaction.guildId,
+                        true,
+                        interaction.user?.id
+                    ));
+                    return;
+                }
+
+                const settingsEntry = Object.entries(SETTINGS_ACTION_IDS)
+                    .find(([, customId]) => interaction.customId === customId);
+                if (settingsEntry) {
+                    const [settingsAction] = settingsEntry;
+                    if (settingsAction === "tutor") {
+                        await interaction.update(buildVoiceGreeterHelpCenter("overview"));
+                    } else {
+                        await interaction.reply({
+                            content: unavailableSettingsMessage(settingsAction),
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+                    return;
+                }
+
+                if (action === "voice_help_overview") {
+                    await interaction.update({
+                        content: interaction.message.content,
+                        ...buildVoiceGreeterHelpCenter("overview")
+                    });
+                    return;
+                }
+
                 if (action === "template_delete_confirm" || action === "template_delete_cancel") {
                     const [, , confirmationId, requesterId] = parts;
                     if (requesterId !== interaction.user.id) {
@@ -1154,6 +1505,64 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
                     return;
                 }
 
+                if (action === "security_spam_policy") {
+                    const feature = await checkFeature(interaction.guildId, "security_assistant");
+                    if (!feature.allowed) {
+                        await interaction.reply({ content: feature.reason, flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    if (!interaction.guild || !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+                        await interaction.reply({ content: "Kamu membutuhkan izin Manage Server untuk mengubah kebijakan moderasi spam.", flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    try {
+                        const policy = await securityAssistant.getSpamPolicy(interaction.guildId);
+                        await interaction.showModal(buildSecuritySpamPolicyModal(policy));
+                    } catch (error) {
+                        await interaction.reply({ content: error.message || "Kebijakan moderasi spam gagal dimuat.", flags: MessageFlags.Ephemeral });
+                    }
+                    return;
+                }
+
+                if (action === "security_spam_policy_confirm") {
+                    const [, , confirmationId, requesterId] = parts;
+                    const pending = pendingSecuritySpamPolicies.get(confirmationId);
+                    if (
+                        !pending ||
+                        pending.requesterId !== interaction.user.id ||
+                        requesterId !== interaction.user.id
+                    ) {
+                        await interaction.reply({ content: "Konfirmasi moderasi ini kedaluwarsa atau hanya dapat digunakan oleh pemintanya.", flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    if (pending.expiresAt <= Date.now() || pending.guildId !== interaction.guildId) {
+                        pendingSecuritySpamPolicies.delete(confirmationId);
+                        await interaction.reply({ content: "Konfirmasi moderasi kedaluwarsa atau bukan untuk server ini.", flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    const feature = await checkFeature(interaction.guildId, "security_assistant");
+                    if (!feature.allowed) {
+                        await interaction.reply({ content: feature.reason, flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    if (!interaction.guild || !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+                        await interaction.reply({ content: "Kamu membutuhkan izin Manage Server untuk mengonfirmasi kebijakan moderasi spam.", flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                    try {
+                        const actor = await interaction.guild.members.fetch(interaction.user.id);
+                        const policy = await securityAssistant.setSpamPolicy(interaction.guild, actor, pending.policy);
+                        pendingSecuritySpamPolicies.delete(confirmationId);
+                        await interaction.editReply({
+                            content: `Kebijakan moderasi spam ${policy.enabled ? "diaktifkan" : "dinonaktifkan"} untuk server ini.`
+                        });
+                    } catch (error) {
+                        await interaction.editReply({ content: error.message || "Kebijakan moderasi spam gagal disimpan." });
+                    }
+                    return;
+                }
+
                 if (action === "security_history") {
                     const feature = await checkFeature(interaction.guildId, "security_assistant");
                     if (!feature.allowed) {
@@ -1166,8 +1575,13 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
                     }
                     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
                     try {
-                        const reports = await securityAssistant.listReports(interaction.guildId);
-                        await interaction.editReply(buildSecurityHistoryPanel(reports));
+                        const [reports, auditEvents] = await Promise.all([
+                            securityAssistant.listReports(interaction.guildId),
+                            typeof securityAssistant.listAuditLog === "function"
+                                ? securityAssistant.listAuditLog(interaction.guildId, 20)
+                                : []
+                        ]);
+                        await interaction.editReply(buildSecurityHistoryPanel(reports, auditEvents));
                     } catch (error) {
                         await interaction.editReply({ content: error.message || "Riwayat audit keamanan gagal dimuat." });
                     }
@@ -1650,24 +2064,37 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
 
                 if (action === "settings") {
                     await interaction.update(
-                        await buildSettingsPanel()
+                        await buildSettingsCenter(
+                            interaction.guildId,
+                            interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild),
+                            interaction.user?.id
+                        )
                     );
                     return;
                 }
 
                 if (action === "feature_selection") {
-                    await interaction.update(
-                        await buildFeatureSelectionPanel(interaction.guild.id)
-                    );
+                    if (!interaction.guild ||
+                        interaction.guild.id !== interaction.guildId ||
+                        !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+                        await interaction.reply({
+                            content: "Kamu membutuhkan izin Manage Server untuk membuka pengaturan fitur server.",
+                            flags: MessageFlags.Ephemeral
+                        });
+                        return;
+                    }
+                    const settings = await applyGlobalAISettings();
+                    await interaction.update(await buildFeatureSelectionPanel(
+                        interaction.guild.id,
+                        { globalAIEnabled: settings.enabled }
+                    ));
                     return;
                 }
 
                 if (action === "feature_toggle") {
-                    if (
-                        !interaction.memberPermissions?.has(
-                            PermissionFlagsBits.ManageGuild
-                        )
-                    ) {
+                    if (!interaction.guild ||
+                        interaction.guild.id !== interaction.guildId ||
+                        !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
                         await interaction.reply({
                             content: "Kamu membutuhkan izin Manage Server untuk mengubah pengaturan fitur.",
                             flags: MessageFlags.Ephemeral
@@ -1699,15 +2126,28 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
                         return;
                     }
 
+                    if (featureId === "ai_chat" && !currentState.enabled) {
+                        const settings = await applyGlobalAISettings();
+                        if (!settings.enabled) {
+                            await interaction.reply({
+                                content: "AI global sedang nonaktif. Pemilik bot harus mengaktifkannya sebelum AI Chat dapat diaktifkan untuk server ini.",
+                                flags: MessageFlags.Ephemeral
+                            });
+                            return;
+                        }
+                    }
+
                     await setFeatureEnabled(
                         guildId,
                         featureId,
                         !currentState.enabled
                     );
 
-                    await interaction.update(
-                        await buildFeatureSelectionPanel(guildId)
-                    );
+                    const settings = await applyGlobalAISettings();
+                    await interaction.update(await buildFeatureSelectionPanel(
+                        guildId,
+                        { globalAIEnabled: settings.enabled }
+                    ));
                     return;
                 }
 
@@ -1739,15 +2179,32 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
                 await interaction.reply(response).catch(() => {});
             }
         }
-    });
-    client.on(Events.MessageCreate, async message => {
+    };
+    const handleMessageCreate = async message => {
         if (!message?.guild || !client?.user) return;
         const trigger = extractTrigger(message, client.user);
         if (!trigger.isTriggered) return;
 
         const commandText = trigger.cleanText;
+        const providerSettingsIntent = parseAIProviderSettingsIntent(commandText);
+        if (providerSettingsIntent) {
+            if (!ownerCheck(message.author.id)) {
+                await message.reply({
+                    content: "Status AI global hanya dapat dilihat oleh pemilik bot.",
+                    allowedMentions: { parse: [] }
+                });
+                return;
+            }
+            const globalSettings = await applyGlobalAISettings();
+            await replyToOwnerPrivately(message, [
+                `AI global: ${globalSettings.enabled ? "aktif" : "nonaktif"}.`,
+                formatAIProviderStatus(getProviderStatus())
+            ].join("\n"), logger);
+            return;
+        }
 
         try {
+            if (voiceCenterTagRouter && await voiceCenterTagRouter({ message, commandText })) return;
             if (serverTemplateTagRouter && await serverTemplateTagRouter({ message, commandText })) return;
             if (await securityTagRouter({ message, commandText })) return;
             if (await playlistTagRouter({ message, commandText })) return;
@@ -1759,13 +2216,55 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
             return;
         }
 
+        const settingsRequest = parseSettingsRequest(commandText);
+        if (settingsRequest) {
+            if (settingsRequest === "tutor") {
+                await message.reply(buildVoiceGreeterHelpCenter("overview"));
+            } else {
+                await message.reply({
+                    content: unavailableSettingsMessage(settingsRequest),
+                    allowedMentions: { parse: [] }
+                });
+            }
+            return;
+        }
+
+        const resolvedIntent = resolveIntent(commandText);
+        if (resolvedIntent.domain === "auto_kick" || resolvedIntent.domain === "manual_kick") {
+            await message.reply({
+                content: "Fitur kick otomatis/manual melalui natural language belum tersedia. Tidak ada anggota yang dikeluarkan; tindakan kick hanya boleh dilakukan melalui alur Discord yang memeriksa izin, kebijakan server, konfirmasi, dan audit.",
+                allowedMentions: { parse: [] }
+            });
+            return;
+        }
+        if (["auto_disconnect", "trusted_member", "social_downloader"].includes(resolvedIntent.domain)) {
+            const unavailableLabels = {
+                auto_disconnect: "Auto Disconnect",
+                trusted_member: "Trusted Member management",
+                social_downloader: "Social Downloader"
+            };
+            await message.reply({
+                content: `${unavailableLabels[resolvedIntent.domain]} belum tersedia melalui handler ini. Tidak ada tindakan yang dijalankan.`,
+                allowedMentions: { parse: [] }
+            });
+            return;
+        }
+        if (!["conversation", "music", "translator", "playlists"].includes(resolvedIntent.domain)) {
+            await message.reply({
+                content: "Intent fitur ini belum terhubung ke handler aktif. Tidak ada tindakan yang dijalankan.",
+                allowedMentions: { parse: [] }
+            });
+            return;
+        }
+
         if (/^(?:reset|hapus|lupakan|clear|forget)(?:\s+(?:riwayat|history|percakapan|conversation|memori|memory|chat))*$/i.test(commandText.trim())) {
             aiConversationService.reset({
                 guildId: message.guild.id,
-                userId: message.author.id
+                userId: message.author.id,
+                channelId: message.channel?.id ? String(message.channel.id) : null
             });
             await message.reply({
-                content: "Riwayat percakapan AI kamu telah dihapus.",
+                content: "Riwayat percakapan AI di channel ini telah dihapus.",
                 allowedMentions: { parse: [] }
             });
             return;
@@ -1789,44 +2288,102 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
         }
 
         if (intent.type === "unknown") {
+            if (resolvedIntent.domain !== "conversation") {
+                await message.reply({
+                    content: "Perintah fitur ini belum dikenali oleh handler yang tersedia. Tidak ada tindakan yang dijalankan.",
+                    allowedMentions: { parse: [] }
+                });
+                return;
+            }
+            let globalSettings;
+            try {
+                globalSettings = await applyGlobalAISettings();
+            } catch {
+                await replyToAIMessage(message, {
+                    content: "Status AI global gagal dibaca. AI Chat dinonaktifkan sementara; hubungi pemilik bot.",
+                    allowedMentions: { parse: [] }
+                }, logger);
+                return;
+            }
+            if (!globalSettings.enabled) {
+                await replyToAIMessage(message, {
+                    content: "AI Chat dinonaktifkan secara global oleh pemilik bot.",
+                    allowedMentions: { parse: [] }
+                }, logger);
+                return;
+            }
             const feature = await checkFeature(message.guild.id, "ai_chat");
             if (!feature.allowed) {
-                await message.reply(feature.reason);
+                await replyToAIMessage(message, feature.reason, logger);
                 return;
             }
 
+            if (aiProviderConfigurationError) {
+                await replyToAIMessage(message, {
+                    content: aiFailureMessage({ code: "configuration_error" }),
+                    allowedMentions: { parse: [] }
+                }, logger);
+                return;
+            }
+
+            let result;
             try {
-                const result = await aiConversationService.respond({
+                if (typeof message.channel?.sendTyping === "function") {
+                    try {
+                        await message.channel.sendTyping();
+                    } catch {}
+                }
+                result = await aiConversationService.respond({
                     guildId: message.guild.id,
                     userId: message.author.id,
+                    channelId: message.channel?.id ? String(message.channel.id) : null,
                     text: commandText
                 });
-                const chunks = splitForDiscord(result.text);
-                await message.reply({
-                    content: chunks.shift(),
+            } catch (error) {
+                if (!(error instanceof AIConversationError)) {
+                    logger.error?.("[Gemini AI Error]", {
+                        provider: "gemini",
+                        operation: ["generate", "model_discovery", "configuration"].includes(error?.operation)
+                            ? error.operation
+                            : "respond",
+                        statusCode: Number.isInteger(error?.statusCode) &&
+                            error.statusCode >= 100 && error.statusCode <= 599
+                            ? error.statusCode
+                            : null,
+                        category: safeAIErrorCode(error)
+                    });
+                }
+                await replyToAIMessage(message, {
+                    content: aiFailureMessage(error),
                     allowedMentions: { parse: [] }
-                });
-                for (const chunk of chunks) {
+                }, logger);
+                return;
+            }
+
+            if (typeof result?.text !== "string" || !result.text.trim()) {
+                await replyToAIMessage(message, {
+                    content: aiFailureMessage({ code: "invalid_response" }),
+                    allowedMentions: { parse: [] }
+                }, logger);
+                return;
+            }
+
+            const chunks = splitForDiscord(result.text);
+            const firstReply = await replyToAIMessage(message, {
+                content: chunks.shift(),
+                allowedMentions: { parse: [] }
+            }, logger);
+            if (!firstReply) return;
+            for (const chunk of chunks) {
+                try {
                     await message.channel.send({
                         content: chunk,
                         allowedMentions: { parse: [] }
                     });
+                } catch {
+                    logger.error?.("[AI Chat Discord Reply Error]", "chunk_send_failed");
+                    return;
                 }
-            } catch (error) {
-                const messages = {
-                    not_configured: "AI belum dikonfigurasi. Admin bot perlu mengisi AI_API_KEY dan AI_MODEL yang didukung provider pada environment.",
-                    rate_limited: "Tunggu sebentar sebelum mengirim pesan AI berikutnya.",
-                    busy: "Castorice masih memproses pesanmu. Coba lagi sebentar.",
-                    input_too_long: error.message,
-                    empty_input: error.message
-                };
-                if (!(error instanceof AIConversationError)) {
-                    console.error("[AI Chat Error]", error.code || error.name || "unknown");
-                }
-                await message.reply({
-                    content: messages[error.code] || "AI gagal merespons. Coba lagi nanti atau periksa konfigurasi provider.",
-                    allowedMentions: { parse: [] }
-                });
             }
             return;
         }
@@ -2122,5 +2679,22 @@ module.exports = function registerInteractionHandler(client, dependencies = {}) 
                 await message.reply(errorMessage).catch(() => {});
             }
         }
-    });
+    };
+
+    try {
+        client.on(Events.InteractionCreate, handleInteractionCreate);
+        client.on(Events.MessageCreate, handleMessageCreate);
+    } catch (error) {
+        client.off?.(Events.InteractionCreate, handleInteractionCreate);
+        client.off?.(Events.MessageCreate, handleMessageCreate);
+        throw error;
+    }
+
+    let disposed = false;
+    return function disposeInteractionHandlers() {
+        if (disposed) return;
+        disposed = true;
+        client.off?.(Events.InteractionCreate, handleInteractionCreate);
+        client.off?.(Events.MessageCreate, handleMessageCreate);
+    };
 };

@@ -1,6 +1,5 @@
 const { spawn } = require("node:child_process");
 const path = require("node:path");
-const net = require("node:net");
 const fs = require("node:fs");
 
 const { DEFAULT_EFFECTS } = require("../effects/presets");
@@ -10,6 +9,13 @@ const { buildFilterGraph } = require("../effects/filter-builder");
 const { stopProcessPair } = require("./process-lifecycle");
 const { createRadioStreamProxy } = require("./radio-stream-proxy");
 const { normalizeStreamUrl } = require("./radio-discovery");
+const { parseExternalHttpUrl, validateMusicInput } = require("./url-security");
+const {
+    createYtDlpEgressProxy,
+    spawnSecuredYtDlp,
+    assertYtDlpEgressIsolation
+} = require("./yt-dlp-egress-proxy");
+const { getTrackMetadata } = require("./track-resolver");
 
 const effectsEndpointManager = new EndpointManager();
 
@@ -20,6 +26,7 @@ const {
     createAudioPlayer,
     createAudioResource,
     joinVoiceChannel,
+    getVoiceConnections,
     entersState
 } = require("@discordjs/voice");
 
@@ -54,88 +61,33 @@ async function withSessionLock(guildId, callback) {
         }
     }
 }
-function resolveYtDlpPath() {
-    const winBin = path.join(process.cwd(), "bin", "yt-dlp.exe");
-    const nixBin = path.join(process.cwd(), "bin", "yt-dlp");
-    if (process.platform === "win32" && fs.existsSync(winBin)) return winBin;
-    if (fs.existsSync(nixBin)) return nixBin;
-    if (fs.existsSync(winBin)) return winBin;
-    return winBin;
+function resolveYtDlpPath({
+    platform = process.platform,
+    cwd = process.cwd(),
+    existsSync = fs.existsSync
+} = {}) {
+    const winBin = path.join(cwd, "bin", "yt-dlp.exe");
+    const nixBin = path.join(cwd, "bin", "yt-dlp");
+    if (platform === "win32" && existsSync(winBin)) return winBin;
+    if (existsSync(nixBin)) return nixBin;
+    return platform === "win32" ? winBin : nixBin;
 }
 const ytDlpPath = resolveYtDlpPath();
 const ffmpegPath = require("ffmpeg-static");
 const MAX_QUEUE_SIZE = 100;
 const MAX_ENDPOINT_BIND_RETRIES = 2;
 
-function validateInput(input) {
-    const value = input.trim();
-
-    if (!value) {
-        throw new Error("Masukkan link atau judul lagu.");
-    }
-
-    if (!/^https?:\/\//i.test(value)) {
-        return `ytsearch1:${value}`;
-    }
-
-    let parsed;
-
-    try {
-        parsed = new URL(value);
-    } catch {
-        throw new Error("Link tidak valid.");
-    }
-
-    const host = parsed.hostname.toLowerCase();
-
-    if (
-        host === "localhost" ||
-        host.endsWith(".localhost") ||
-        host.endsWith(".local")
-    ) {
-        throw new Error("Alamat lokal tidak diizinkan.");
-    }
-
-    if (net.isIP(host)) {
-        if (host.includes(":")) {
-            if (
-                host === "::1" ||
-                host.startsWith("fc") ||
-                host.startsWith("fd") ||
-                host.startsWith("fe80:")
-            ) {
-                throw new Error("Alamat IP privat tidak diizinkan.");
-            }
-        } else {
-            const [a, b] = host.split(".").map(Number);
-
-            if (
-                a === 0 ||
-                a === 10 ||
-                a === 127 ||
-                a >= 224 ||
-                (a === 169 && b === 254) ||
-                (a === 172 && b >= 16 && b <= 31) ||
-                (a === 192 && b === 168) ||
-                (a === 100 && b >= 64 && b <= 127)
-            ) {
-                throw new Error("Alamat IP privat tidak diizinkan.");
-            }
-        }
-    }
-
-    return value;
-}
-
 async function cleanupTrack(session) {
     const ytProcess = session.ytProcess;
     const ffmpegProcess = session.ffmpegProcess;
     const radioProxy = session.radioStreamProxy;
+    const ytDlpProxy = session.ytDlpProxy;
 
     session.ytProcess = null;
     session.ffmpegProcess = null;
     session.resource = null;
     session.radioStreamProxy = null;
+    session.ytDlpProxy = null;
 
     const errors = [];
     try {
@@ -148,8 +100,13 @@ async function cleanupTrack(session) {
     } catch (error) {
         errors.push(error);
     }
+    try {
+        await ytDlpProxy?.close();
+    } catch (error) {
+        errors.push(error);
+    }
     if (errors.length) {
-        throw new AggregateError(errors, "Music process or radio proxy cleanup failed.");
+        throw new AggregateError(errors, "Music process or network proxy cleanup failed.");
     }
 }
 
@@ -181,23 +138,28 @@ function destroySession(guildId, session) {
     session.autoplaySearchController?.abort();
 
     session.destroyPromise = (async () => {
+        const cleanupErrors = [];
         try {
             await cleanupTrack(session);
         } catch (error) {
+            cleanupErrors.push(error);
             console.error("[Music Process Cleanup Error]", error);
         }
 
         try {
             await closeEffectsRuntime(session);
         } catch (error) {
+            cleanupErrors.push(error);
             console.error("[Effects Runtime Cleanup Error]", error);
         }
 
         try {
             session.connection.destroy();
         } catch (error) {
+            cleanupErrors.push(error);
             console.error("[Voice Connection Cleanup Error]", error);
         }
+        session.destroyErrors = cleanupErrors;
     })();
 
     return session.destroyPromise;
@@ -219,6 +181,25 @@ async function createSession(guild, member, runtime = {}) {
     });
 }
 
+async function shutdown() {
+    const activeSessions = Array.from(sessions.entries());
+    await Promise.all(activeSessions.map(([guildId, session]) =>
+        destroySession(guildId, session)
+    ));
+
+    const errors = activeSessions.flatMap(([, session]) => session.destroyErrors || []);
+    for (const connection of getVoiceConnections().values()) {
+        try {
+            connection.destroy();
+        } catch (error) {
+            errors.push(error);
+        }
+    }
+    if (errors.length) {
+        throw new AggregateError(errors, "Voice connection shutdown failed.");
+    }
+}
+
 async function createSessionUnlocked(guild, member, runtime = {}) {
     if (!guild || !member?.voice?.channel) {
         throw new Error("Masuk ke voice channel terlebih dahulu.");
@@ -238,7 +219,7 @@ async function createSessionUnlocked(guild, member, runtime = {}) {
     }
 
     if (!fileExists(ytDlpBinary)) {
-        throw new Error("yt-dlp.exe tidak ditemukan di folder bin.");
+        throw new Error("Binary yt-dlp untuk platform ini tidak ditemukan di folder bin.");
     }
 
     const channel = member.voice.channel;
@@ -274,6 +255,7 @@ async function createSessionUnlocked(guild, member, runtime = {}) {
         history: [],
         ytProcess: null,
         ffmpegProcess: null,
+        ytDlpProxy: null,
         resource: null,
         volume: 100,
         effects: {
@@ -370,6 +352,12 @@ async function startTrack(session, track, offsetSeconds = 0, preserveTransition 
     if (session.closed) {
         throw new Error("Sesi musik sudah ditutup.");
     }
+    if (track.radioStream !== true) {
+        assertYtDlpEgressIsolation();
+    }
+    const source = await validateMusicInput(track.source, {
+        resolveDns: track.radioStream !== true
+    });
 
     const allocateEndpoint = runtime.allocateEndpoint ||
         (() => effectsEndpointManager.allocate());
@@ -380,6 +368,7 @@ async function startTrack(session, track, offsetSeconds = 0, preserveTransition 
     const EffectsControllerClass = runtime.EffectsController || EffectsController;
     const stopChildren = runtime.stopProcessPair || stopProcessPair;
     const openRadioProxy = runtime.createRadioStreamProxy || createRadioStreamProxy;
+    const openYtDlpProxy = runtime.createYtDlpEgressProxy || createYtDlpEgressProxy;
     const endpointRetryCount = Number.isSafeInteger(runtime.endpointRetryCount)
         ? runtime.endpointRetryCount
         : 0;
@@ -402,6 +391,7 @@ async function startTrack(session, track, offsetSeconds = 0, preserveTransition 
     let ytProcess = null;
     let ffmpegProcess = null;
     let radioProxy = null;
+    let ytDlpProxy = null;
     let ytError = "";
     let ytBytes = 0;
     let ffmpegError = "";
@@ -422,7 +412,7 @@ async function startTrack(session, track, offsetSeconds = 0, preserveTransition 
         const radioStream = track.radioStream === true;
         if (radioStream) {
             radioProxy = await openRadioProxy({
-                sourceUrl: track.source,
+                sourceUrl: source,
                 ...(runtime.radioProxyOptions || {})
             });
             if (session.closed || token !== session.trackToken) {
@@ -433,7 +423,7 @@ async function startTrack(session, track, offsetSeconds = 0, preserveTransition 
             session.radioStreamProxy = radioProxy;
         }
         if (!radioStream) {
-            ytProcess = spawnChild(
+            const secured = await spawnSecuredYtDlp(
                 runtime.ytDlpPath || ytDlpPath,
                 [
                     "--no-playlist",
@@ -445,13 +435,20 @@ async function startTrack(session, track, offsetSeconds = 0, preserveTransition 
                     "-o",
                     "-",
                     "--",
-                    track.source
+                    source
                 ],
                 {
-                    windowsHide: true,
-                    stdio: ["ignore", "pipe", "pipe"]
+                    spawnImpl: spawnChild,
+                    proxyFactory: openYtDlpProxy,
+                    spawnOptions: {
+                        windowsHide: true,
+                        stdio: ["ignore", "pipe", "pipe"]
+                    }
                 }
             );
+            ytProcess = secured.child;
+            ytDlpProxy = secured.proxy;
+            session.ytDlpProxy = ytDlpProxy;
         }
 
         const ffmpegArgs = ["-hide_banner", "-loglevel", "error"];
@@ -643,8 +640,16 @@ async function startTrack(session, track, offsetSeconds = 0, preserveTransition 
         } catch (proxyCleanupError) {
             console.error("[Radio Proxy Cleanup Error]", proxyCleanupError);
         }
+        try {
+            await ytDlpProxy?.close();
+        } catch (proxyCleanupError) {
+            console.error("[Music Egress Proxy Cleanup Error]", proxyCleanupError);
+        }
         if (session.radioStreamProxy === radioProxy) {
             session.radioStreamProxy = null;
+        }
+        if (session.ytDlpProxy === ytDlpProxy) {
+            session.ytDlpProxy = null;
         }
 
         if (session.ytProcess === ytProcess) {
@@ -746,7 +751,9 @@ async function finishTrack(session, runtime = {}) {
         const controller = new AbortController();
         session.autoplaySearchController = controller;
         try {
+            assertYtDlpEgressIsolation();
             const search = runtime.searchTracks || searchTracks;
+            const validateInput = runtime.validateMusicInput || validateMusicInput;
             const query = `${completedTrack.artist || ""} similar to ${completedTrack.title || completedTrack.input || ""} songs`
                 .trim()
                 .slice(0, 180);
@@ -779,7 +786,7 @@ async function finishTrack(session, runtime = {}) {
                     ) continue;
 
                     try {
-                        const source = validateInput(url);
+                        const source = await validateInput(url);
                         session.queue.push({
                             input: url,
                             source,
@@ -834,73 +841,6 @@ async function finishTrack(session, runtime = {}) {
     session.finishing = false;
 }
 
-function getTrackMetadata(source) {
-    return new Promise(resolve => {
-        const process = spawn(
-            ytDlpPath,
-            [
-                "--dump-single-json",
-                "--skip-download",
-                "--no-playlist",
-                "--no-warnings",
-                "--quiet",
-                "--",
-                source
-            ],
-            {
-                windowsHide: true,
-                stdio: ["ignore", "pipe", "pipe"]
-            }
-        );
-
-        let output = "";
-        let settled = false;
-
-        const finish = value => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeout);
-            resolve(value);
-        };
-
-        const timeout = setTimeout(() => {
-            stopSearchProcess(process);
-            finish(null);
-        }, 25000);
-
-        process.stdout.on("data", data => {
-            output += data.toString();
-
-            if (output.length > 2 * 1024 * 1024) {
-                stopSearchProcess(process);
-                finish(null);
-            }
-        });
-
-        process.on("error", () => finish(null));
-
-        process.on("close", code => {
-            if (code !== 0) {
-                finish(null);
-                return;
-            }
-
-            try {
-                const data = JSON.parse(output);
-
-                finish({
-                    title: data.title || data.fulltitle || "Unknown Title",
-                    artist: data.artist || data.creator || data.uploader || data.channel || "Unknown Artist",
-                    duration: Number.isFinite(data.duration) ? data.duration : null,
-                    thumbnail: data.thumbnail || null,
-                    webpageUrl: data.webpage_url || source
-                });
-            } catch {
-                finish(null);
-            }
-        });
-    });
-}
 function buildSearchQuery(input) {
     let query = String(input || "").trim().slice(0, 180);
 
@@ -927,56 +867,79 @@ function buildSearchQuery(input) {
     return `${query} ${extra.join(" ")}`.trim();
 }
 
-function searchTracks(input, { signal } = {}) {
+async function searchTracks(input, {
+    signal,
+    spawnImpl = spawn,
+    proxyFactory = createYtDlpEgressProxy,
+    timeoutMs = 20000,
+    maxOutputBytes = 2 * 1024 * 1024
+} = {}) {
+    assertYtDlpEgressIsolation();
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+        throw new RangeError("Music search timeout must be between 1 and 60000 ms.");
+    }
+    if (!Number.isInteger(maxOutputBytes) || maxOutputBytes < 1024 || maxOutputBytes > 10 * 1024 * 1024) {
+        throw new RangeError("Music search output limit is invalid.");
+    }
+    const query = buildSearchQuery(input);
+    if (!query || signal?.aborted) return [];
+
+    let secured;
+    try {
+        secured = await spawnSecuredYtDlp(
+            ytDlpPath,
+            [
+                "--flat-playlist",
+                "--dump-json",
+                "--skip-download",
+                "--no-warnings",
+                "--no-progress",
+                "--quiet",
+                "--",
+                `ytsearch8:${query}`
+            ],
+            {
+                spawnImpl,
+                proxyFactory,
+                spawnOptions: { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }
+            }
+        );
+    } catch (error) {
+        console.error("[Music Search Error]", error.message);
+        throw error;
+    }
+    if (signal?.aborted) {
+        stopSearchProcess(secured.child);
+        await secured.proxy.close();
+        return [];
+    }
+
     return new Promise(resolve => {
-        const query = buildSearchQuery(input);
-
-        if (!query || signal?.aborted) {
-            resolve([]);
-            return;
-        }
-
-        let child;
+        const child = secured.child;
         let timeout;
         let abortListener;
         let settled = false;
         let output = "";
+        let outputBytes = 0;
 
         const finish = results => {
             if (settled) return;
             settled = true;
             clearTimeout(timeout);
             if (abortListener) signal?.removeEventListener("abort", abortListener);
-            resolve(results);
-        };
-
-        try {
-            child = spawn(
-                ytDlpPath,
-                [
-                    "--flat-playlist",
-                    "--dump-json",
-                    "--skip-download",
-                    "--no-warnings",
-                    "--no-progress",
-                    "--quiet",
-                    "--",
-                    `ytsearch8:${query}`
-                ],
-                {
-                    windowsHide: true,
-                    stdio: ["ignore", "pipe", "ignore"]
+            Promise.resolve(secured.proxy.close()).then(
+                () => resolve(results),
+                error => {
+                    console.error("[Music Egress Proxy Cleanup Error]", error.message);
+                    resolve([]);
                 }
             );
-        } catch {
-            finish([]);
-            return;
-        }
+        };
 
         timeout = setTimeout(() => {
             stopSearchProcess(child);
             finish([]);
-        }, 20000);
+        }, timeoutMs);
         abortListener = () => {
             stopSearchProcess(child);
             finish([]);
@@ -984,15 +947,19 @@ function searchTracks(input, { signal } = {}) {
         signal?.addEventListener("abort", abortListener, { once: true });
 
         child.stdout.on("data", data => {
-            output += data.toString();
-
-            if (output.length > 2 * 1024 * 1024) {
+            outputBytes += data.length;
+            if (outputBytes > maxOutputBytes) {
                 stopSearchProcess(child);
                 finish([]);
+                return;
             }
+            output += data.toString();
         });
 
-        child.on("error", () => finish([]));
+        child.on("error", error => {
+            console.error("[Music Search Error]", error.message);
+            finish([]);
+        });
 
         child.on("close", code => {
             if (code !== 0 || settled) {
@@ -1007,12 +974,12 @@ function searchTracks(input, { signal } = {}) {
                 .flatMap(line => {
                     try {
                         const item = JSON.parse(line);
-                        const url = item.webpage_url ||
+                        const candidate = item.webpage_url ||
                             (item.id
                                 ? `https://www.youtube.com/watch?v=${item.id}`
                                 : null);
-
-                        if (!item.title || !url) return [];
+                        if (!item.title || !candidate) return [];
+                        const url = parseExternalHttpUrl(candidate).toString();
 
                         return [{
                             title: item.title,
@@ -1041,8 +1008,11 @@ async function addToQueue(guild, member, input, options = {}) {
     }
 
     const radioStation = options.radioStation || null;
+    if (!radioStation) {
+        assertYtDlpEgressIsolation();
+    }
     const queueInput = radioStation ? radioStation.streamUrl : input;
-    const source = validateInput(queueInput);
+    const source = await validateMusicInput(queueInput, { resolveDns: !radioStation });
 
     if (!ffmpegPath || (!radioStation && !fs.existsSync(ytDlpPath))) {
         throw new Error("FFmpeg atau yt-dlp belum tersedia.");
@@ -1078,7 +1048,7 @@ async function addToQueue(guild, member, input, options = {}) {
             thumbnail: null,
             webpageUrl: source
         }
-        : await getTrackMetadata(source);
+        : await getTrackMetadata(source, { binary: ytDlpPath });
 
     if (radioStation && !metadata.title) {
         throw new Error("Nama stasiun radio tidak valid.");
@@ -1491,6 +1461,8 @@ module.exports = {
     clearQueue,
     moveInQueue,
     stop,
+    shutdown,
     getSession,
-    getSessions: () => sessions
+    getSessions: () => sessions,
+    resolveYtDlpPath
 };

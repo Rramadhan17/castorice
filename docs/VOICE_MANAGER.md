@@ -20,3 +20,15 @@ Run the isolated service tests with:
 ```sh
 node --test test/voice-ai/manager-service.test.js
 ```
+
+## Regular voice-channel creation
+
+The existing Voice Manager service also exposes `createVoiceChannel()` for regular server voice channels. Unlike temporary voice creation, it does not require the requester to already be connected, move the requester, or create temporary-voice ownership state. The bot needs `Manage Channels`; an optional category must belong to the same guild. Public/private access and member limits are validated at the service boundary.
+
+The existing ephemeral Voice Manager panel includes a category selector, a name/privacy/member-limit modal, a preview, and a requester-bound confirmation. AI Tag requests accept Indonesian/English voice-channel/room/VC phrasing and ask for a name rather than guessing when omitted. If a category name does not resolve uniquely, the request asks the user to select or mention the intended category.
+
+The deterministic intent router also accepts common natural variants for temporary-room rename, lock/unlock, member limit (including common Indonesian and English number words), ownership transfer via a Discord user mention, and deletion. These continue to call the existing owner-checked service; unsupported language is not converted into an unverified Discord action. AI Chat responses are public in the invoking channel, and conversational context is shared only within that guild/channel; member-specific rate limits remain separate.
+
+Mocked regression coverage includes service invocation, request routing, category validation/selection, preview confirmation, guild/user scoping, and preservation of the legacy temporary-voice route. No live Discord channel was created; test in a staging guild after granting `Manage Channels`.
+
+The broader dynamic-room controls are not all implemented: hide/show, bitrate, per-room trusted access/permission configuration, and owner-initiated member disconnect are not advertised as available controls. The current temporary room panel continues to support its existing create, rename, lock/unlock, limit, transfer, and confirmed-delete features. These remaining items require backend permission checks, state lifecycle design, and focused tests before being enabled.

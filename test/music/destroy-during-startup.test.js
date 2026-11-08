@@ -65,6 +65,10 @@ test("Stop during a pending ZeroMQ readiness request settles startup and release
     const requestStarted = new Promise(resolve => { readinessStarted = resolve; });
     const runtime = {
         allocateEndpoint: async () => ({ endpoint: "tcp://127.0.0.1:42001", release: () => { releaseCount += 1; } }),
+        createRadioStreamProxy: async () => ({
+            url: "http://127.0.0.1:45678/opaque-token",
+            async close() {}
+        }),
         spawn: () => {
             const child = fakeChild(children.length + 1);
             children.push(child);
@@ -84,7 +88,11 @@ test("Stop during a pending ZeroMQ readiness request settles startup and release
         }
     };
 
-    const startup = startTrack(session, { source: "ytsearch1:test", title: "test" }, 0, false, runtime);
+    const startup = startTrack(session, {
+        source: "https://radio.example/live",
+        title: "Radio",
+        radioStream: true
+    }, 0, false, runtime);
     await requestStarted;
     await stop(guild);
     await assert.rejects(startup, /ditutup saat startup|startup track dibatalkan/i);
@@ -92,7 +100,7 @@ test("Stop during a pending ZeroMQ readiness request settles startup and release
     assert.equal(getSession(guildId), null);
     assert.equal(session.closed, true);
     assert.equal(player.played.length, 0);
-    assert.equal(children.length, 2);
+    assert.equal(children.length, 1);
     assert.ok(children.every(child => child.killed));
     assert.equal(clientCloseCount, 1);
     assert.equal(releaseCount, 1);

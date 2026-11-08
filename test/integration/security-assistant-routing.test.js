@@ -65,6 +65,14 @@ test("Security Assistant Dashboard exposes a private, permission-checked audit h
             listReports: async guildId => {
                 assert.equal(guildId, guild.id);
                 return [report];
+            },
+            listAuditLog: async guildId => {
+                assert.equal(guildId, guild.id);
+                return [{
+                    at: "2026-11-06T12:01:00.000Z",
+                    type: "spam_timeout_applied",
+                    detail: "member=22345678901234567; count=8"
+                }];
             }
         }
     });
@@ -72,16 +80,76 @@ test("Security Assistant Dashboard exposes a private, permission-checked audit h
     const panelButtons = buildFeaturePanel("security_assistant").components
         .flatMap(row => row.components.map(component => component.toJSON()));
     assert.equal(panelButtons.some(button => button.custom_id === "castorice:security_history"), true);
+    assert.match(buildFeaturePanel("security_assistant").embeds[0].data.description, /mode alert-only/i);
+    assert.equal(panelButtons.some(button => button.custom_id === "castorice:security_spam_policy"), true);
 
     const interaction = makeInteraction(guild, true, "castorice:security_history");
     await onInteraction(interaction);
     assert.deepEqual(interaction.calls.deferred, { flags: 64 });
     assert.match(interaction.calls.edited.embeds[0].data.description, /report-history/);
     assert.match(interaction.calls.edited.embeds[0].data.description, /1 critical/);
+    assert.match(interaction.calls.edited.embeds[0].data.description, /spam_timeout_applied/);
 
     const denied = makeInteraction(guild, false, "castorice:security_history");
     await onInteraction(denied);
     assert.match(denied.calls.reply.content, /Manage Server/i);
+});
+
+test("spam moderation Dashboard requires preview, requester confirmation, and Manage Server", async () => {
+    const guild = makeGuild(makeGuildId());
+    const defaultPolicy = {
+        enabled: false,
+        deleteThreshold: 5,
+        timeoutThreshold: 8,
+        timeoutSeconds: 60
+    };
+    let saved = 0;
+    const client = new EventEmitter();
+    registerInteractionHandler(client, {
+        securityAssistant: {
+            audit: async () => ({ summary: { critical: 0, high: 0, medium: 0, low: 0 }, findings: [] }),
+            getSpamPolicy: async () => defaultPolicy,
+            setSpamPolicy: async (targetGuild, actor, policy) => {
+                assert.equal(targetGuild.id, guild.id);
+                assert.equal(actor.id, "23456789012345678");
+                saved += 1;
+                return policy;
+            }
+        }
+    });
+    const onInteraction = client.listeners(Events.InteractionCreate)[0];
+    const open = makeInteraction(guild, true, "castorice:security_spam_policy");
+    let modal;
+    open.showModal = async value => { modal = value.toJSON(); };
+    await onInteraction(open);
+    assert.equal(modal.custom_id, "castorice:security_spam_policy_submit");
+
+    let preview;
+    const submit = {
+        ...makeInteraction(guild),
+        customId: "castorice:security_spam_policy_submit",
+        isButton: () => false,
+        isModalSubmit: () => true,
+        fields: {
+            getTextInputValue: key => ({
+                security_spam_enabled: "ON",
+                security_spam_delete_threshold: "4",
+                security_spam_timeout_threshold: "9",
+                security_spam_timeout_seconds: "120"
+            })[key]
+        },
+        reply: async payload => { preview = payload; }
+    };
+    await onInteraction(submit);
+    assert.equal(preview.flags, 64);
+    assert.match(preview.embeds[0].data.description, /AKTIF setelah konfirmasi/);
+    assert.equal(saved, 0);
+
+    const confirmationId = preview.components[0].components[0].toJSON().custom_id;
+    const confirm = makeInteraction(guild, true, confirmationId);
+    await onInteraction(confirm);
+    assert.equal(saved, 1);
+    assert.match(confirm.calls.edited.content, /diaktifkan/);
 });
 
 test("Security policy requires preview, requester confirmation, and Manage Server at activation", async () => {

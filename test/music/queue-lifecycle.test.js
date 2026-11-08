@@ -116,7 +116,7 @@ test("finish skips a failed queued track and starts the following track", async 
     assert.deepEqual(session.queue, []);
 });
 
-test("autoplay skips recently completed tracks and queues one valid recommendation", async () => {
+test("autoplay fails closed without starting an external search", async () => {
     const completed = {
         id: "completed",
         title: "Current Song",
@@ -125,14 +125,15 @@ test("autoplay skips recently completed tracks and queues one valid recommendati
     };
     const session = makeSession({ currentTrack: completed });
     session.autoplayEnabled = true;
+    let searches = 0;
     const starts = [];
-    let searchQuery;
 
     await finishTrack(session, {
         async cleanupTrack() {},
         async closeEffectsRuntime() {},
+        async validateMusicInput(url) { return url; },
         async searchTracks(query) {
-            searchQuery = query;
+            searches += 1;
             return [
                 { title: "Current Song", webpageUrl: completed.webpageUrl },
                 { title: "Next Song", webpageUrl: "https://www.youtube.com/watch?v=next" }
@@ -145,11 +146,10 @@ test("autoplay skips recently completed tracks and queues one valid recommendati
         }
     });
 
-    assert.match(searchQuery, /Current Artist similar to Current Song songs/);
-    assert.equal(starts.length, 1);
-    assert.equal(starts[0].title, "Next Song");
-    assert.equal(starts[0].autoplay, true);
-    assert.equal(starts[0].requestedBy, null);
+    assert.equal(searches, 0);
+    assert.equal(starts.length, 0);
+    assert.equal(session.queue.length, 0);
+    assert.match(session.error, /isolasi egress tingkat proses\/OS/);
 });
 
 test("autoplay does not search when a user-requested track is already queued", async () => {
@@ -177,36 +177,26 @@ test("autoplay does not search when a user-requested track is already queued", a
     assert.equal(started, queued);
 });
 
-test("disabling autoplay aborts an in-flight recommendation and starts no suggested track", async t => {
+test("autoplay does not invoke a supplied search helper while yt-dlp is disabled", async t => {
     const guildId = `autoplay-${Date.now()}-${Math.random()}`;
     const session = makeSession({ currentTrack: { id: "completed", title: "Song" } });
     session.autoplayEnabled = true;
     music.getSessions().set(guildId, session);
     t.after(() => music.getSessions().delete(guildId));
-    let signal;
+    let searches = 0;
     let started = 0;
 
-    const finishing = finishTrack(session, {
+    await finishTrack(session, {
         async cleanupTrack() {},
         async closeEffectsRuntime() {},
-        searchTracks(_query, options) {
-            signal = options.signal;
-            return new Promise(resolve => {
-                signal.addEventListener("abort", () => resolve([
-                    { title: "Suggested", webpageUrl: "https://www.youtube.com/watch?v=suggested" }
-                ]), { once: true });
-            });
-        },
+        async searchTracks() { searches += 1; return []; },
         async startTrack() { started += 1; }
     });
-    await new Promise(resolve => setImmediate(resolve));
 
-    assert.equal(music.setAutoplay(guildId, false), false);
-    await finishing;
-
-    assert.equal(signal.aborted, true);
+    assert.equal(searches, 0);
     assert.equal(started, 0);
     assert.equal(session.queue.length, 0);
+    assert.match(session.error, /isolasi egress tingkat proses\/OS/);
 });
 
 test("overlapping manual transitions reject the second operation", async () => {

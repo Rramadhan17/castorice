@@ -53,7 +53,7 @@ function createVoiceAITagRouter({
             const messages = {
                 not_in_voice: "Masuk ke voice channel server ini terlebih dahulu.",
                 tts_not_configured: "Voice AI memerlukan provider TTS yang dikonfigurasi melalui VOICE_GREETER_TTS_MODULE.",
-                not_configured: "AI belum dikonfigurasi. Admin bot perlu mengisi AI_API_KEY dan AI_MODEL.",
+                not_configured: "Gemini belum dikonfigurasi. Pemilik bot perlu menetapkan GEMINI_API_KEY; GEMINI_MODEL opsional.",
                 rate_limited: "Tunggu sebentar sebelum meminta jawaban AI berikutnya.",
                 busy: "Castorice masih memproses permintaanmu. Coba lagi sebentar.",
                 input_too_long: error.message,
@@ -61,7 +61,7 @@ function createVoiceAITagRouter({
                 bot_member: error.message
             };
             await message.reply({
-                content: messages[error.code] || "Voice AI gagal memproses permintaan. Periksa konfigurasi provider dan coba lagi.",
+                content: messages[error.code] || "Voice AI gagal memproses permintaan Gemini. Coba lagi nanti atau periksa konfigurasi Gemini.",
                 allowedMentions: { parse: [] }
             });
         }

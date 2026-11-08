@@ -24,6 +24,9 @@ test("conversation service isolates context per guild and user and supports rese
     await service.respond({ guildId: "guild-a", userId: "user-a", text: "second" });
     await service.respond({ guildId: "guild-b", userId: "user-a", text: "separate" });
 
+    assert.match(requests[0][0].content, /Indonesian, English, slang, abbreviations, and code-switching/);
+    assert.match(requests[0][0].content, /general-purpose/);
+    assert.match(requests[0][0].content, /do not treat every message as a request to change Discord/);
     assert.deepEqual(requests[1].slice(1).map(message => message.content), [
         "first",
         "reply-1",
@@ -39,6 +42,79 @@ test("conversation service isolates context per guild and user and supports rese
         completionTokens: 2,
         totalTokens: 5
     });
+});
+
+test("public conversation context is shared per guild and channel, but isolated across channels", async () => {
+    const requests = [];
+    const service = createAIConversationService({
+        provider: {
+            generate: async messages => {
+                requests.push(messages);
+                return { text: `reply-${requests.length}` };
+            }
+        },
+        minIntervalMs: 0
+    });
+
+    await service.respond({
+        guildId: "guild-a",
+        channelId: "channel-a",
+        userId: "user-a",
+        text: "first public message"
+    });
+    await service.respond({
+        guildId: "guild-a",
+        channelId: "channel-a",
+        userId: "user-b",
+        text: "follow-up from another member"
+    });
+    await service.respond({
+        guildId: "guild-a",
+        channelId: "channel-b",
+        userId: "user-b",
+        text: "separate channel"
+    });
+    await service.respond({
+        guildId: "guild-b",
+        channelId: "channel-a",
+        userId: "user-b",
+        text: "separate guild"
+    });
+
+    assert.deepEqual(requests[1].slice(1).map(message => message.content), [
+        "first public message",
+        "reply-1",
+        "follow-up from another member"
+    ]);
+    assert.deepEqual(requests[2].slice(1).map(message => message.content), ["separate channel"]);
+    assert.deepEqual(requests[3].slice(1).map(message => message.content), ["separate guild"]);
+
+    service.reset({ guildId: "guild-a", channelId: "channel-a", userId: "user-c" });
+    await service.respond({
+        guildId: "guild-a",
+        channelId: "channel-a",
+        userId: "user-c",
+        text: "fresh channel context"
+    });
+    assert.deepEqual(requests[4].slice(1).map(message => message.content), ["fresh channel context"]);
+});
+
+test("shared public history keeps rate limits per member", async () => {
+    let now = 1_000;
+    const service = createAIConversationService({
+        provider: { generate: async () => ({ text: "ok" }) },
+        clock: () => now,
+        minIntervalMs: 10
+    });
+    const common = { guildId: "guild-a", channelId: "channel-a" };
+    await service.respond({ ...common, userId: "user-a", text: "one" });
+    await service.respond({ ...common, userId: "user-b", text: "two" });
+    await assert.rejects(
+        service.respond({ ...common, userId: "user-a", text: "three" }),
+        error => error.code === "rate_limited"
+    );
+    now += 10;
+    await service.respond({ ...common, userId: "user-a", text: "four" });
 });
 
 test("conversation service enforces rate limits, input bounds, and expiration", async () => {
@@ -69,7 +145,7 @@ test("conversation service clearly reports a missing provider", async () => {
     const service = createAIConversationService();
     await assert.rejects(
         service.respond({ guildId: "guild-a", userId: "user-a", text: "hello" }),
-        error => error.code === "not_configured"
+        error => error.code === "not_configured" && /Gemini.*GEMINI_API_KEY/.test(error.message)
     );
 });
 
