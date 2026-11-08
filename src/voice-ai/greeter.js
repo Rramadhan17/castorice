@@ -1,4 +1,4 @@
-﻿const fs = require("node:fs/promises");
+const fs = require("node:fs/promises");
 const path = require("node:path");
 const { Events, PermissionFlagsBits } = require("discord.js");
 const { checkFeature } = require("../core/feature-guard");
@@ -7,7 +7,7 @@ const { buildVoiceGreeterHelpCenter } = require("../dashboard/voice-greeter-help
 
 const DATA_DIRECTORY = path.resolve(__dirname, "../../data/guilds");
 const COOLDOWN_MS = 5 * 60 * 1000;
-const DEFAULT_GREETING = "Haii {user}, selamat datang di voice! Kenalin, aku AI Server Ras Ultra. Aku diciptakan oleh kyru untuk membantu kalian. Kalau butuh bantuan, aku bisa bantu putar musik, cari lagu, atur volume, bikin private voice, atau nemenin kamu ngobrol. Mau dibantu apa nih?";
+const DEFAULT_GREETING = "Hai, aku Castorice AI Assistant. Kalau butuh bantuan, kamu bisa tag/mention aku atau cukup panggil namaku. Cara menggunakanku ada di bawah, ya!";
 const MAX_GREETING_LENGTH = 500;
 
 const cache = new Map();
