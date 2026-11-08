@@ -40,14 +40,11 @@ test("Voice Greeter sends one mention-safe greeting for concurrent join events",
     ]);
 
     assert.equal(sent.length, 1);
-    assert.equal(
-        sent[0].content,
-        "Haii <@12345678901234567>, selamat datang di voice! Kenalin, aku AI Server Ras Ultra. Aku diciptakan oleh kyru untuk membantu kalian. Kalau butuh bantuan, aku bisa bantu putar musik, cari lagu, atur volume, bikin private voice, atau nemenin kamu ngobrol. Mau dibantu apa nih?"
-    );
+    assert.equal(sent[0].content, registerGreeter.DEFAULT_GREETING);
     assert.deepEqual(sent[0].allowedMentions.users, [state.id]);
     assert.equal(sent[0].embeds[0].data.title, "Help Center Castorice — Ringkasan");
     assert.equal(sent[0].components[0].components[0].data.custom_id, "castorice:voice_help_select");
-    assert.match(sent[0].content, new RegExp(state.id));
+    assert.doesNotMatch(sent[0].content, /<@/);
 });
 
 test("Voice Greeter still sends the greeting when Help Center panel construction fails", async t => {
@@ -81,7 +78,7 @@ test("Voice Greeter still sends the greeting when Help Center panel construction
     }
 
     assert.equal(sent.length, 1);
-    assert.match(sent[0].content, /selamat datang di voice/i);
+    assert.equal(sent[0].content, registerGreeter.DEFAULT_GREETING);
     assert.equal(sent[0].components, undefined);
 });
 
@@ -214,7 +211,7 @@ test("Voice Greeter ignores bots and non-join transitions", async () => {
     assert.equal(sends, 0);
 });
 
-test("Voice Greeter sends text first and speaks the personalized greeting through the configured provider", async t => {
+test("Voice Greeter sends the default text first and speaks the same greeting through the configured provider", async t => {
     t.after(async () => { await fs.rm(guildDirectory, { recursive: true, force: true }); });
     const order = [];
     const player = new EventEmitter();
@@ -261,6 +258,6 @@ test("Voice Greeter sends text first and speaks the personalized greeting throug
     });
 
     assert.deepEqual(order, ["text", "audio"]);
-    assert.match(spokenText, /Haii Codi/);
+    assert.equal(spokenText, registerGreeter.DEFAULT_GREETING);
     assert.doesNotMatch(spokenText, /<@/);
 });
